@@ -255,6 +255,87 @@ const CAT_DEFS = [
   ["Sparen & reserveringen", "Spaarrekening Maud / ING", "savings", false],
 ];
 
+/* ---- Sluitpost: het verschil komt automatisch op Gezamenlijke spaarrekening ---- */
+const SLUITPOST_ID = slug("Gezamenlijke spaarrekening / ING");
+function computeSluitpostMonths(categories, lines) {
+  const months = Array.from({ length: 12 }, () => 0);
+  for (const c of categories) {
+    if (c.id === SLUITPOST_ID) continue;
+    const l = lines[c.id]; if (!l) continue;
+    for (let m = 0; m < 12; m++) months[m] += c.type === "income" ? l.months[m] : -l.months[m];
+  }
+  return months; // = inkomsten − overige uitgaven, per maand
+}
+function applySluitpost(categories, lines) {
+  const sp = computeSluitpostMonths(categories, lines);
+  return { ...lines, [SLUITPOST_ID]: { average: Math.round(sumMonths(sp) / 12), months: sp } };
+}
+function budgetTotals(categories, lines) {
+  let income = 0, outflow = 0;
+  for (const c of categories) {
+    const l = lines[c.id]; if (!l) continue;
+    const annual = sumMonths(l.months);
+    if (c.type === "income") income += annual; else outflow += annual;
+  }
+  return { income, outflow, diff: income - outflow };
+}
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+function matchCategoryByName(name, categories) {
+  const n = normName(name);
+  if (!n || n.length < 3) return null;
+  let best = null;
+  for (const c of categories) {
+    if (c.id === SLUITPOST_ID) continue;
+    const cn = normName(c.naam);
+    if (cn === n) return c;                                                    // exact wint
+    if (!best && (cn.startsWith(n) || n.startsWith(cn)) && n.length >= 4) best = c; // ruim
+  }
+  return best;
+}
+function cellToCents(v) {
+  if (typeof v === "number" && isFinite(v)) return Math.round(v * 100);
+  if (typeof v === "string") {
+    const t = v.replace(/[€\s]/g, "").trim();
+    if (t === "" || t === "-" || !/[0-9]/.test(t)) return null;
+    try { return parseDecimalToCents(t); } catch { return null; }
+  }
+  return null;
+}
+function parseBudgetRows(rows, categories) {
+  const updates = {}, matched = [], unmatched = [];
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    let nameIdx = -1, name = "";
+    for (let i = 0; i < row.length; i++) {
+      const v = row[i];
+      if (typeof v === "string" && v.trim() && !/^[\s€.,\-0-9]+$/.test(v.trim())) { nameIdx = i; name = v.trim(); break; }
+    }
+    if (nameIdx < 0) continue;
+    let avg = null;
+    for (let i = nameIdx + 1; i < row.length; i++) { const c = cellToCents(row[i]); if (c != null) { avg = c; break; } }
+    if (avg == null) continue;
+    const cat = matchCategoryByName(name, categories);
+    if (cat) { updates[cat.id] = avg; matched.push(cat.naam); }
+    else unmatched.push(name);
+  }
+  return { updates, matched, unmatched };
+}
+
+const yearOf = (iso) => Number(iso.slice(0, 4));
+function txYearActuals(transactions, categories, jaartal) {
+  const actuals = Array.from({ length: 12 }, () => ({ income: 0, expense: 0 }));
+  const catType = {}; for (const c of categories) catType[c.id] = c.type;
+  for (const t of transactions) {
+    if (yearOf(t.date) !== jaartal) continue;
+    const m = monthOf(t.date);
+    for (const a of t.allocations) {
+      if (catType[a.categoryId] === "income") actuals[m - 1].income += a.amountCents;
+      else actuals[m - 1].expense += Math.abs(a.amountCents);
+    }
+  }
+  return actuals;
+}
+
 function buildSeed() {
   const groups = GROUPS_DEF.map((naam, i) => ({ id: slug(naam), naam, volgorde: i }));
   const categories = CAT_DEFS.map(([g, naam, type, note], i) => ({ id: slug(naam), groupId: slug(g), naam, type, noteSuggested: note, volgorde: i }));
@@ -281,15 +362,12 @@ function buildSeed() {
   set("Woning / ABN", 580); set("Vakantie / ING", 300); set("Woonbelasting / ING", 120);
   set("Nieuwe Auto --> aflossen auto / ABN", 100); set("Eigen risico / ING", 50); set("Spaarrekening Maud / ING", 85);
 
-  let income = 0, outflow = 0;
-  for (const c of categories) { const a = A[c.id] || 0; c.type === "income" ? (income += a) : (outflow += a); }
-  A[cid("Gezamenlijke spaarrekening / ING")] = income - outflow; // sluitpost
-
   const lines = {};
-  for (const c of categories) { const a = A[c.id] || 0; if (a !== 0) lines[c.id] = { average: a, months: distributeEven(a) }; }
+  for (const c of categories) { const a = A[c.id] || 0; if (a !== 0 && c.id !== SLUITPOST_ID) lines[c.id] = { average: a, months: distributeEven(a) }; }
+  const balanced = applySluitpost(categories, lines); // Gezamenlijke spaarrekening = sluitpost
 
-  const year = { id: "2026", jaartal: 2026, carryInCents: -1199, status: "open" }; // Achterzoom −€11,99
-  const budgets = { "2026": lines };
+  const years = [{ id: "2026", jaartal: 2026, carryInCents: -1199, status: "open" }]; // Achterzoom −€11,99
+  const budgets = { "2026": balanced };
 
   const pots = [
     { categoryId: cid("Gezamenlijke spaarrekening / ING"), opening: 1_200_000 },
@@ -299,17 +377,28 @@ function buildSeed() {
     { categoryId: cid("Spaarrekening Maud / ING"), opening: 320_000 },
   ];
 
-  // Een paar duidelijke startregels; de rommelige (persoonsoverboekingen, horeca)
-  // laat je in de popup categoriseren — en leren.
+  // Startregels op basis van je terugkerende winkels; de rommelige
+  // (persoonsoverboekingen) laat je in de popup categoriseren — en leren.
+  let rid = 0;
+  const R = (catName, value, prio, field = "name", operator = "contains") =>
+    ({ id: "r" + (++rid), categoryId: cid(catName), priority: prio, active: true, conditions: [{ field, operator, value }] });
   const rules = [
-    { id: "r1", categoryId: cid("Boodschappen: supermarkt, speciaalzaak, drogist"), priority: 30, active: true, conditions: [{ field: "name", operator: "contains", value: "albert heijn" }] },
-    { id: "r2", categoryId: cid("Boodschappen: supermarkt, speciaalzaak, drogist"), priority: 30, active: true, conditions: [{ field: "name", operator: "contains", value: "plus moerkapelle" }] },
-    { id: "r3", categoryId: cid("Bankkosten / ING"), priority: 20, active: true, conditions: [{ field: "name", operator: "contains", value: "kosten oranjepakket" }] },
-    { id: "r4", categoryId: cid("Bankkosten / ING"), priority: 20, active: true, conditions: [{ field: "name", operator: "contains", value: "kosten tweede rekeninghouder" }] },
-    { id: "r5", categoryId: cid("Kleding; zit in zakgeld"), priority: 40, active: true, conditions: [{ field: "name", operator: "contains", value: "zeeman" }] },
+    R("Boodschappen: supermarkt, speciaalzaak, drogist", "albert heijn", 30),
+    R("Boodschappen: supermarkt, speciaalzaak, drogist", "plus moerkapelle", 30),
+    R("Boodschappen: supermarkt, speciaalzaak, drogist", "jumbo", 30),
+    R("Boodschappen: supermarkt, speciaalzaak, drogist", "lidl", 30),
+    R("Bankkosten / ING", "kosten oranjepakket", 20),
+    R("Bankkosten / ING", "kosten tweede rekeninghouder", 20),
+    R("Kleding; zit in zakgeld", "zeeman", 40),
+    R("Uitstapjes/bestellen", "van eesteren", 35),
+    R("Uitstapjes/bestellen", "bagels", 35),
+    R("Uitstapjes/bestellen", "la place", 35),
+    R("Persoonlijke verzorging: kapper, schoonheid", "etos", 35),
+    R("Huis en tuin", "hema", 45),
+    R("Parkeren", "stadshart", 45),
   ];
 
-  return { groups, categories, budgets, year, pots, rules, transactions: [] };
+  return { groups, categories, budgets, years, activeYearId: "2026", pots, rules, transactions: [] };
 }
 
 /* ----------------------------------------------------------- UI-bouwstenen */
@@ -322,6 +411,7 @@ const icons = {
   posten: <><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></>,
   import: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>,
   regels: <><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></>,
+  uitgaven: <><line x1="4" y1="20" x2="4" y2="11" /><line x1="10" y1="20" x2="10" y2="4" /><line x1="16" y1="20" x2="16" y2="14" /></>,
 };
 function Btn({ children, onClick, variant = "primary", disabled, size = "md", title }) {
   const base = { fontFamily: T.sans, fontWeight: 600, border: "1px solid transparent", borderRadius: 8, cursor: disabled ? "default" : "pointer", padding: size === "sm" ? "5px 10px" : "9px 15px", fontSize: size === "sm" ? 13 : 14, lineHeight: 1.2, whiteSpace: "nowrap" };
@@ -333,7 +423,7 @@ function Btn({ children, onClick, variant = "primary", disabled, size = "md", ti
   };
   return <button title={title} onClick={onClick} disabled={disabled} style={{ ...base, ...styles[variant] }}>{children}</button>;
 }
-const Card = ({ children, style }) => <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: T.radius, ...style }}>{children}</div>;
+const Card = ({ children, style, ...rest }) => <div {...rest} style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: T.radius, ...style }}>{children}</div>;
 function Money({ cents, sign = false, bold = false, muted = false, size }) {
   const color = !sign ? (muted ? T.sub : T.ink) : cents > 0 ? T.pos : cents < 0 ? T.neg : T.sub;
   return <span style={{ fontFamily: T.mono, fontVariantNumeric: "tabular-nums", color, fontWeight: bold ? 700 : 500, fontSize: size }}>{formatEUR(cents)}</span>;
@@ -587,21 +677,123 @@ function SaldoChart({ rows, currentMonth }) {
   );
 }
 
-function Begroting({ groups, categories, budgets, year, onSaveLine, breakEven }) {
+function AddPostRow({ groupId, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [naam, setNaam] = useState("");
+  const [type, setType] = useState("expense");
+  const add = () => { const n = naam.trim(); if (!n) return; onAdd(groupId, n, type); setNaam(""); setType("expense"); setOpen(false); };
+  if (!open) return (
+    <div style={{ padding: "7px 16px", borderTop: `1px solid ${T.line}` }}>
+      <Btn variant="ghost" size="sm" onClick={() => setOpen(true)}>+ nieuwe post</Btn>
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "8px 16px", borderTop: `1px solid ${T.line}`, background: "#fafcfb", flexWrap: "wrap" }}>
+      <input autoFocus value={naam} onChange={(e) => setNaam(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} placeholder="Naam van de post" style={{ ...inputStyle, width: 230, padding: "6px 10px", fontSize: 13 }} />
+      <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...inputStyle, width: 130, padding: "6px 10px", fontSize: 13 }}>
+        <option value="expense">uitgave</option>
+        <option value="savings">sparen</option>
+        <option value="income">inkomsten</option>
+      </select>
+      <Btn size="sm" onClick={add}>Toevoegen</Btn>
+      <Btn variant="ghost" size="sm" onClick={() => { setOpen(false); setNaam(""); }}>Annuleren</Btn>
+    </div>
+  );
+}
+
+function Begroting({ groups, categories, budgets, year, onSaveLine, onImportBudget, onAddCategory, prevYear, prevActualByCat }) {
   const [expanded, setExpanded] = useState(null);
-  const lines = budgets[year.id] || {};
+  const [drag, setDrag] = useState(false);
+  const [impResult, setImpResult] = useState(null);
+  const fileRef = useRef(null);
+  const lines = applySluitpost(categories, budgets[year.id] || {});
   const lineFor = (cid) => lines[cid] || { average: 0, months: distributeEven(0) };
+  const totals = budgetTotals(categories, lines);
+  const hasPrev = !!(prevYear && prevActualByCat);
+  const cols = hasPrev ? "1fr 130px 110px 120px 80px" : "1fr 130px 120px 80px";
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setImpResult(null);
+    try {
+      let rows;
+      if (/\.xlsx?$/i.test(file.name)) {
+        const XLSX = await import("xlsx");
+        const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
+      } else {
+        const text = await file.text();
+        const head = (text.split(/\r?\n/)[0] || "").toLowerCase();
+        if (/naam \/ omschrijving|mutatiesoort|saldo na mutatie|bedrag \(eur\)/.test(head)) { setImpResult({ bank: true }); return; }
+        const delim = text.includes("\t") ? "\t" : text.includes(";") ? ";" : ",";
+        rows = text.split(/\r?\n/).filter((l) => l.trim() !== "").map((l) => l.split(delim));
+      }
+      const { updates, unmatched } = parseBudgetRows(rows, categories);
+      const n = Object.keys(updates).length;
+      if (n > 0) onImportBudget(updates);
+      setImpResult({ matched: n, unmatched });
+    } catch (e) {
+      setImpResult({ error: e.message || "onbekende fout" });
+    }
+  };
+
   return (
     <div>
       <SectionTitle>Begroting {year.jaartal}</SectionTitle>
-      <div style={{ marginBottom: 16 }}>
-        {breakEven.ok ? <Banner tone="ok">De begroting is sluitend: inkomsten en uitgaven (incl. sparen) zijn precies in balans op {formatEUR(breakEven.income)} per jaar.</Banner>
-          : <Banner tone="warn">Nog niet sluitend — {breakEven.diff > 0 ? "overschot" : "tekort"} van {formatEUR(Math.abs(breakEven.diff))} per jaar.</Banner>}
+
+      <Card style={{ padding: 0, marginBottom: 16, overflow: "hidden" }}>
+        <div style={{ display: "flex", flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 150, padding: "14px 18px", borderRight: `1px solid ${T.line}` }}>
+            <div style={{ fontSize: 12, color: T.sub, marginBottom: 4 }}>Inkomsten / jaar</div>
+            <Money cents={totals.income} bold size={20} />
+          </div>
+          <div style={{ flex: 1, minWidth: 150, padding: "14px 18px", borderRight: `1px solid ${T.line}` }}>
+            <div style={{ fontSize: 12, color: T.sub, marginBottom: 4 }}>Uitgaven &amp; sparen / jaar</div>
+            <Money cents={totals.outflow} bold size={20} />
+          </div>
+          <div style={{ flex: 1, minWidth: 150, padding: "14px 18px", background: T.accentSoft }}>
+            <div style={{ fontSize: 12, color: T.accent, marginBottom: 4, fontWeight: 600 }}>In balans</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: T.pos, display: "flex", alignItems: "center", gap: 6 }}>
+              <Icon d={<polyline points="20 6 9 17 4 12" />} size={18} /> Sluitend
+            </div>
+          </div>
+        </div>
+        <div style={{ padding: "10px 18px", borderTop: `1px solid ${T.line}`, fontSize: 12, color: T.sub }}>
+          Het verschil tussen inkomsten en uitgaven komt automatisch op <b>Gezamenlijke spaarrekening / ING</b>. Daardoor klopt de begroting altijd precies.
+        </div>
+      </Card>
+
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={(e) => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]); }}
+        onClick={() => fileRef.current && fileRef.current.click()}
+        style={{ border: `2px dashed ${drag ? T.accent : T.line}`, background: drag ? T.accentSoft : T.panel, borderRadius: T.radius, padding: "16px 18px", marginBottom: 14, cursor: "pointer", textAlign: "center" }}
+      >
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.tsv,.txt" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
+        <div style={{ fontSize: 14, fontWeight: 600 }}>Sleep hier je begroting · alleen postnaam + maandbedrag</div>
+        <div style={{ fontSize: 12, color: T.sub, marginTop: 3 }}>Excel of CSV · dit is níét voor je bankafschrift — dat hoort op de Import-tab</div>
       </div>
+      {impResult && (
+        <div style={{ marginBottom: 16 }}>
+          {impResult.bank ? <Banner tone="warn">Dit lijkt je <b>bankafschrift</b>, niet je begroting. Sleep dit bestand op de <b>Import</b>-tab — daar lees je je transacties in.</Banner>
+            : impResult.error ? <Banner tone="neg">Kon het bestand niet lezen: {impResult.error}. Tip: bewaar je Excel-tabblad als CSV en sleep dat.</Banner>
+            : <Banner tone={impResult.unmatched.length ? "warn" : "ok"}>
+                {impResult.matched} post(en) herkend en bijgewerkt; de begroting is automatisch sluitend gemaakt.
+                {impResult.unmatched.length > 0 && <div style={{ marginTop: 6, fontSize: 13 }}>Niet aan een post gekoppeld ({impResult.unmatched.length}): {impResult.unmatched.slice(0, 8).join(", ")}{impResult.unmatched.length > 8 ? "…" : ""}</div>}
+              </Banner>}
+        </div>
+      )}
+
+      {hasPrev && <div style={{ marginBottom: 14 }}><Banner tone="neutral">Tip: de kolom <b>{prevYear.jaartal} werkelijk</b> laat zien wat je vorig jaar echt uitgaf. Gebruik dat als ijkpunt en pas posten aan op bekende veranderingen.</Banner></div>}
+
       <Card style={{ overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
+          <span>Post</span><span style={{ textAlign: "right" }}>per maand</span>{hasPrev && <span style={{ textAlign: "right" }}>{prevYear.jaartal} werkelijk</span>}<span style={{ textAlign: "right" }}>per jaar</span><span />
+        </div>
         {groups.map((g) => {
           const cats = categories.filter((c) => c.groupId === g.id);
-          if (!cats.length) return null;
           const subtotal = cats.reduce((a, c) => a + sumMonths(lineFor(c.id).months), 0);
           return (
             <div key={g.id}>
@@ -610,21 +802,34 @@ function Begroting({ groups, categories, budgets, year, onSaveLine, breakEven })
               </div>
               {cats.map((c) => {
                 const line = lineFor(c.id), annual = sumMonths(line.months), isOpen = expanded === c.id;
+                const prevA = hasPrev ? (prevActualByCat[c.id] || 0) : 0;
+                if (c.id === SLUITPOST_ID) return (
+                  <div key={c.id} style={{ borderTop: `1px solid ${T.line}`, background: "#fcf9e8" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: cols, alignItems: "center", gap: 10, padding: "8px 16px" }}>
+                      <span style={{ fontSize: 14, fontWeight: 600 }}>{c.naam} <span style={{ fontSize: 11, color: T.warn, fontWeight: 600 }}>· sluitpost</span></span>
+                      <div style={{ textAlign: "right", fontSize: 12, color: T.sub }}>{formatEUR(Math.round(annual / 12))}</div>
+                      {hasPrev && <div style={{ textAlign: "right", fontSize: 12, color: T.sub }}>{prevA ? formatEUR(prevA) : "—"}</div>}
+                      <div style={{ textAlign: "right", fontSize: 13 }}><Money cents={annual} bold /></div>
+                      <div />
+                    </div>
+                  </div>
+                );
                 return (
                   <div key={c.id} style={{ borderTop: `1px solid ${T.line}` }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 130px 120px 80px", alignItems: "center", gap: 10, padding: "8px 16px" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: cols, alignItems: "center", gap: 10, padding: "8px 16px" }}>
                       <span style={{ fontSize: 14 }}>{c.naam}{c.noteSuggested && <span title="opmerking voorgesteld" style={{ marginLeft: 6, color: T.warn }}>•</span>}</span>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
-                        <span style={{ fontSize: 11, color: T.sub }}>gem.</span>
-                        <MoneyInput cents={line.average} width={95} onChange={(v) => onSaveLine(c.id, v, distributeEven(v))} />
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+                        <MoneyInput cents={line.average} width={110} onChange={(v) => onSaveLine(c.id, v, distributeEven(v))} />
                       </div>
-                      <div style={{ textAlign: "right", fontSize: 13 }}><Money cents={annual} muted /><span style={{ fontSize: 11, color: T.sub }}>/jr</span></div>
+                      {hasPrev && <div style={{ textAlign: "right", fontSize: 12, color: T.sub }}>{prevA ? formatEUR(prevA) : "—"}</div>}
+                      <div style={{ textAlign: "right", fontSize: 13 }}><Money cents={annual} muted /></div>
                       <div style={{ textAlign: "right" }}><Btn variant="ghost" size="sm" onClick={() => setExpanded(isOpen ? null : c.id)}>{isOpen ? "sluit" : "maanden"}</Btn></div>
                     </div>
                     {isOpen && <MonthEditor line={line} onSave={(months) => onSaveLine(c.id, line.average, months)} />}
                   </div>
                 );
               })}
+              <AddPostRow groupId={g.id} onAdd={onAddCategory} />
             </div>
           );
         })}
@@ -658,28 +863,81 @@ function MonthEditor({ line, onSave }) {
   );
 }
 
-function Posten({ groups, categories, onToggleNote }) {
-  const typeLabel = { income: "inkomsten", expense: "uitgave", savings: "sparen" };
+function Uitgaven({ groups, categories, budgets, year, transactions, onAddCategory }) {
+  const [expanded, setExpanded] = useState(null);
+  const lines = applySluitpost(categories, budgets[year.id] || {});
+  const actualByCat = useMemo(() => {
+    const map = {};
+    for (const t of transactions) {
+      if (yearOf(t.date) !== year.jaartal) continue;
+      const m = monthOf(t.date);
+      for (const a of t.allocations) {
+        if (!map[a.categoryId]) map[a.categoryId] = Array.from({ length: 12 }, () => 0);
+        map[a.categoryId][m - 1] += a.amountCents;
+      }
+    }
+    return map;
+  }, [transactions, year]);
+  const names = ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+  const yearTxCount = transactions.filter((t) => yearOf(t.date) === year.jaartal).length;
+  const totalIncome = categories.filter((c) => c.type === "income").reduce((s, c) => s + Math.abs(sumMonths(actualByCat[c.id] || [])), 0);
+  const totalOut = categories.filter((c) => c.type !== "income").reduce((s, c) => s + Math.abs(sumMonths(actualByCat[c.id] || [])), 0);
+  const cols = "1fr 110px 110px 110px 60px";
+
   return (
     <div>
-      <SectionTitle>Posten</SectionTitle>
+      <SectionTitle>Uitgaven {year.jaartal} · werkelijk vs. begroot</SectionTitle>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+        <Card style={{ padding: 16, flex: 1, minWidth: 175 }}><div style={{ fontSize: 12, color: T.sub, marginBottom: 4 }}>Inkomsten dit jaar</div><Money cents={totalIncome} bold size={20} /></Card>
+        <Card style={{ padding: 16, flex: 1, minWidth: 175 }}><div style={{ fontSize: 12, color: T.sub, marginBottom: 4 }}>Uitgaven &amp; sparen dit jaar</div><Money cents={totalOut} bold size={20} /></Card>
+        <Card style={{ padding: 16, flex: 1, minWidth: 175 }}><div style={{ fontSize: 12, color: T.sub, marginBottom: 4 }}>Verschil</div><Money cents={totalIncome - totalOut} sign bold size={20} /></Card>
+      </div>
+      {yearTxCount === 0 && <div style={{ marginBottom: 16 }}><Banner tone="neutral">Nog geen transacties in {year.jaartal}. Importeer je ING-CSV onder <b>Import</b> om je uitgaven hier te zien.</Banner></div>}
       <Card style={{ overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
+          <span>Post</span><span style={{ textAlign: "right" }}>Begroot</span><span style={{ textAlign: "right" }}>Werkelijk</span><span style={{ textAlign: "right" }}>Verschil</span><span />
+        </div>
         {groups.map((g) => {
           const cats = categories.filter((c) => c.groupId === g.id);
-          if (!cats.length) return null;
+          let gB = 0, gA = 0;
+          for (const c of cats) { gB += Math.abs(sumMonths((lines[c.id] || { months: distributeEven(0) }).months)); gA += Math.abs(sumMonths(actualByCat[c.id] || [])); }
           return (
             <div key={g.id}>
-              <div style={{ padding: "10px 16px", background: "#f0f4f3", fontSize: 13, fontWeight: 700 }}>{g.naam}</div>
-              {cats.map((c) => (
-                <div key={c.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center", padding: "9px 16px", borderTop: `1px solid ${T.line}` }}>
-                  <span style={{ fontSize: 14 }}>{c.naam}</span>
-                  <Badge tone={c.type}>{typeLabel[c.type]}</Badge>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 12, color: T.sub }}>opmerking vragen</span>
-                    <Toggle on={c.noteSuggested} onClick={() => onToggleNote(c.id)} />
+              <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 16px", background: "#f0f4f3", fontSize: 12, fontWeight: 700 }}>
+                <span>{g.naam}</span>
+                <span style={{ textAlign: "right", fontFamily: T.mono, color: T.sub }}>{formatEUR(gB)}</span>
+                <span style={{ textAlign: "right", fontFamily: T.mono }}>{formatEUR(gA)}</span>
+                <span /><span />
+              </div>
+              {cats.map((c) => {
+                const budgetAbs = Math.abs(sumMonths((lines[c.id] || { months: distributeEven(0) }).months));
+                const actualMonths = actualByCat[c.id] || Array.from({ length: 12 }, () => 0);
+                const actualAbs = Math.abs(sumMonths(actualMonths));
+                const diff = c.type === "income" ? actualAbs - budgetAbs : budgetAbs - actualAbs; // + = gunstig
+                const isOpen = expanded === c.id;
+                return (
+                  <div key={c.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                    <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, alignItems: "center", padding: "8px 16px" }}>
+                      <span style={{ fontSize: 13 }}>{c.naam}</span>
+                      <span style={{ textAlign: "right" }}><Money cents={budgetAbs} muted /></span>
+                      <span style={{ textAlign: "right" }}><Money cents={actualAbs} /></span>
+                      <span style={{ textAlign: "right", fontFamily: T.mono, fontVariantNumeric: "tabular-nums", fontSize: 13, color: diff >= 0 ? T.pos : T.neg }}>{diff >= 0 ? "+ " : "− "}{formatEUR(Math.abs(diff))}</span>
+                      <span style={{ textAlign: "right" }}><Btn variant="ghost" size="sm" onClick={() => setExpanded(isOpen ? null : c.id)}>{isOpen ? "sluit" : "mnd"}</Btn></span>
+                    </div>
+                    {isOpen && (
+                      <div style={{ padding: "4px 16px 12px", background: "#fafcfb", display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8 }}>
+                        {actualMonths.map((m, i) => (
+                          <div key={i} style={{ textAlign: "center" }}>
+                            <div style={{ fontSize: 10, color: T.sub }}>{names[i]}</div>
+                            <div style={{ fontSize: 12, fontFamily: T.mono }}>{m === 0 ? "—" : formatEUR(Math.abs(m))}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
+              <AddPostRow groupId={g.id} onAdd={onAddCategory} />
             </div>
           );
         })}
@@ -688,28 +946,111 @@ function Posten({ groups, categories, onToggleNote }) {
   );
 }
 
-function Regels({ rules, categories, onToggle, onDelete }) {
-  const catName = (id) => categories.find((c) => c.id === id)?.naam || "—";
-  const fl = { iban: "tegenrekening", name: "naam", description: "omschrijving", mutationType: "mutatiesoort", amount: "bedrag" };
-  const ol = { equals: "is", contains: "bevat", startsWith: "begint met", amountRange: "tussen" };
-  const sorted = [...rules].sort((a, b) => a.priority - b.priority);
+function Posten({ groups, categories, transactions, onToggleNote, onUpdateCategory, onDeleteCategory, onAddCategory }) {
+  const used = new Set();
+  for (const t of transactions) for (const a of t.allocations) used.add(a.categoryId);
   return (
     <div>
-      <SectionTitle>Regels</SectionTitle>
-      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Regels ontstaan vanzelf wanneer je tijdens het importeren "Onthoud dit" aanvinkt. Hier kun je ze bekijken, uitzetten of verwijderen.</Banner></div>
+      <SectionTitle>Posten beheren</SectionTitle>
+      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Voeg eigen posten toe, hernoem ze, kies het type, of verwijder ze. Zet "opmerking" aan voor posten waar je bij het importeren een toelichting wilt typen. Een post met transacties kun je niet verwijderen.</Banner></div>
       <Card style={{ overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "60px 2fr 1.4fr 60px 80px", gap: 10, padding: "9px 16px", background: "#f0f4f3", fontSize: 12, fontWeight: 700, color: T.sub }}>
-          <span>Actief</span><span>Als…</span><span>Dan post</span><span style={{ textAlign: "center" }}>Prio</span><span></span>
-        </div>
-        {sorted.map((r) => (
-          <div key={r.id} style={{ display: "grid", gridTemplateColumns: "60px 2fr 1.4fr 60px 80px", gap: 10, alignItems: "center", padding: "9px 16px", borderTop: `1px solid ${T.line}` }}>
-            <Toggle on={r.active} onClick={() => onToggle(r.id)} />
-            <span style={{ fontSize: 13 }}>{r.conditions.map((c, i) => <span key={i}>{i > 0 && <span style={{ color: T.sub }}> en </span>}<b>{fl[c.field]}</b> {ol[c.operator]} "<span style={{ fontFamily: T.mono }}>{c.value}</span>"</span>)}</span>
-            <span style={{ fontSize: 13 }}>{catName(r.categoryId)}</span>
-            <span style={{ textAlign: "center", fontFamily: T.mono, fontSize: 13 }}>{r.priority}</span>
-            <Btn variant="danger" size="sm" onClick={() => onDelete(r.id)}>Verwijder</Btn>
+        {groups.map((g) => {
+          const cats = categories.filter((c) => c.groupId === g.id);
+          return (
+            <div key={g.id}>
+              <div style={{ padding: "10px 16px", background: "#f0f4f3", fontSize: 13, fontWeight: 700 }}>{g.naam}</div>
+              {cats.map((c) => {
+                const isSluit = c.id === SLUITPOST_ID;
+                const inUse = used.has(c.id);
+                return (
+                  <div key={c.id} style={{ display: "grid", gridTemplateColumns: "1fr 130px 150px 90px", gap: 12, alignItems: "center", padding: "8px 16px", borderTop: `1px solid ${T.line}`, background: isSluit ? "#fcf9e8" : undefined }}>
+                    <input value={c.naam} disabled={isSluit} onChange={(e) => onUpdateCategory(c.id, { naam: e.target.value })} style={{ ...inputStyle, padding: "6px 10px", fontSize: 13, border: isSluit ? "none" : `1px solid ${T.line}`, background: isSluit ? "transparent" : "#fff" }} />
+                    <select value={c.type} disabled={isSluit} onChange={(e) => onUpdateCategory(c.id, { type: e.target.value })} style={{ ...inputStyle, padding: "6px 10px", fontSize: 13, opacity: isSluit ? 0.6 : 1 }}>
+                      <option value="expense">uitgave</option>
+                      <option value="savings">sparen</option>
+                      <option value="income">inkomsten</option>
+                    </select>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12, color: T.sub }}>opmerking</span>
+                      <Toggle on={c.noteSuggested} onClick={() => onToggleNote(c.id)} />
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      {isSluit ? <span style={{ fontSize: 11, color: T.sub }}>automatisch</span>
+                        : inUse ? <span style={{ fontSize: 11, color: T.sub }} title="heeft transacties">in gebruik</span>
+                        : <Btn variant="danger" size="sm" onClick={() => onDeleteCategory(c.id)}>Verwijder</Btn>}
+                    </div>
+                  </div>
+                );
+              })}
+              <AddPostRow groupId={g.id} onAdd={onAddCategory} />
+            </div>
+          );
+        })}
+      </Card>
+    </div>
+  );
+}
+
+function Regels({ rules, categories, groups, onToggle, onDelete, onUpdate, onAdd, onAddDefaults }) {
+  const fl = { name: "naam", iban: "tegenrekening", description: "omschrijving", mutationType: "mutatiesoort" };
+  const ol = { contains: "bevat", equals: "is", startsWith: "begint met" };
+  const sorted = [...rules].sort((a, b) => a.priority - b.priority);
+  const [adding, setAdding] = useState(false);
+  const [nf, setNf] = useState({ field: "name", operator: "contains", value: "", categoryId: "", priority: 50 });
+  const grid = "52px 92px 92px 1fr 1.3fr 54px 64px";
+  const catOptions = groups.map((g) => (
+    <optgroup key={g.id} label={g.naam}>
+      {categories.filter((c) => c.groupId === g.id && c.id !== SLUITPOST_ID).map((c) => <option key={c.id} value={c.id}>{c.naam}</option>)}
+    </optgroup>
+  ));
+  const submitNew = () => {
+    if (!nf.value.trim() || !nf.categoryId) return;
+    onAdd({ categoryId: nf.categoryId, priority: Number(nf.priority) || 50, conditions: [{ field: nf.field, operator: nf.operator, value: nf.value.trim() }] });
+    setNf({ field: "name", operator: "contains", value: "", categoryId: "", priority: 50 });
+    setAdding(false);
+  };
+  return (
+    <div>
+      <SectionTitle right={<div style={{ display: "flex", gap: 8 }}>{onAddDefaults && <Btn variant="secondary" size="sm" onClick={onAddDefaults}>Standaardregels</Btn>}<Btn size="sm" onClick={() => setAdding((a) => !a)}>+ Nieuwe regel</Btn></div>}>Regels</SectionTitle>
+      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Regels categoriseren je transacties automatisch. Ze ontstaan vanzelf via "Onthoud dit" bij het importeren, maar je kunt ze hier ook zelf maken en aanpassen. Lagere prioriteit gaat vóór.</Banner></div>
+
+      {adding && (
+        <Card style={{ padding: 16, marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Nieuwe regel: als…</div>
+          <div style={{ display: "grid", gridTemplateColumns: "120px 120px 1fr", gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <select value={nf.field} onChange={(e) => setNf({ ...nf, field: e.target.value })} style={{ ...inputStyle, padding: "7px 10px", fontSize: 13 }}>{Object.entries(fl).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+            <select value={nf.operator} onChange={(e) => setNf({ ...nf, operator: e.target.value })} style={{ ...inputStyle, padding: "7px 10px", fontSize: 13 }}>{Object.entries(ol).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+            <input value={nf.value} onChange={(e) => setNf({ ...nf, value: e.target.value })} placeholder='bijv. albert heijn' style={{ ...inputStyle, padding: "7px 10px", fontSize: 13, fontFamily: T.mono }} />
           </div>
-        ))}
+          <div style={{ fontSize: 13, fontWeight: 700, margin: "10px 0 8px" }}>…dan op post</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 110px auto", gap: 8, alignItems: "center" }}>
+            <select value={nf.categoryId} onChange={(e) => setNf({ ...nf, categoryId: e.target.value })} style={{ ...inputStyle, padding: "7px 10px", fontSize: 13 }}><option value="">— kies post —</option>{catOptions}</select>
+            <input type="number" value={nf.priority} onChange={(e) => setNf({ ...nf, priority: e.target.value })} title="prioriteit (lager = eerst)" style={{ ...inputStyle, padding: "7px 10px", fontSize: 13, textAlign: "center" }} />
+            <Btn size="sm" onClick={submitNew} disabled={!nf.value.trim() || !nf.categoryId}>Toevoegen</Btn>
+          </div>
+        </Card>
+      )}
+
+      <Card style={{ overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: grid, gap: 8, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
+          <span>Actief</span><span>Veld</span><span>Operator</span><span>Waarde</span><span>Post</span><span style={{ textAlign: "center" }}>Prio</span><span />
+        </div>
+        {sorted.length === 0 && <div style={{ padding: 16, fontSize: 13, color: T.sub }}>Nog geen regels. Maak er een met "+ Nieuwe regel".</div>}
+        {sorted.map((r) => {
+          const cond = r.conditions[0] || { field: "name", operator: "contains", value: "" };
+          const setCond = (patch) => onUpdate(r.id, { conditions: [{ ...cond, ...patch }] });
+          return (
+            <div key={r.id} style={{ display: "grid", gridTemplateColumns: grid, gap: 8, alignItems: "center", padding: "8px 16px", borderTop: `1px solid ${T.line}` }}>
+              <Toggle on={r.active} onClick={() => onToggle(r.id)} />
+              <select value={cond.field} onChange={(e) => setCond({ field: e.target.value })} style={{ ...inputStyle, padding: "5px 6px", fontSize: 12 }}>{Object.entries(fl).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+              <select value={cond.operator} onChange={(e) => setCond({ operator: e.target.value })} style={{ ...inputStyle, padding: "5px 6px", fontSize: 12 }}>{Object.entries(ol).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+              <input value={cond.value} onChange={(e) => setCond({ value: e.target.value })} style={{ ...inputStyle, padding: "5px 8px", fontSize: 12, fontFamily: T.mono }} />
+              <select value={r.categoryId} onChange={(e) => onUpdate(r.id, { categoryId: e.target.value })} style={{ ...inputStyle, padding: "5px 6px", fontSize: 12 }}>{catOptions}</select>
+              <input type="number" value={r.priority} onChange={(e) => onUpdate(r.id, { priority: Number(e.target.value) || 0 })} style={{ ...inputStyle, padding: "5px 6px", fontSize: 12, textAlign: "center" }} />
+              <Btn variant="danger" size="sm" onClick={() => onDelete(r.id)}>Wis</Btn>
+            </div>
+          );
+        })}
       </Card>
     </div>
   );
@@ -720,18 +1061,27 @@ function Import({ categories, groups, rules, existingHashes, onCommit }) {
   const [parsed, setParsed] = useState(null);
   const [phase, setPhase] = useState("upload"); // upload | summary | review | done
   const [result, setResult] = useState(null);
+  const [drag, setDrag] = useState(false);
+  const fileRef = useRef(null);
 
-  const run = () => {
-    const { txns, errors } = parseINGCsv(text);
+  const runWith = (csv) => {
+    const { txns, errors } = parseINGCsv(csv);
     const reconciled = reconcileImport(txns.map((t, i) => ({ ...t, id: "tx-" + dedupHash(t) + "-" + i })), existingHashes);
     setParsed({ reconciled, errors });
     setPhase("summary");
+  };
+  const run = () => runWith(text);
+  const handleFile = async (file) => {
+    if (!file) return;
+    const csv = await file.text();
+    setText(csv);
+    runWith(csv);
   };
 
   const news = parsed ? parsed.reconciled.filter((r) => r.isNew) : [];
   const dupCount = parsed ? parsed.reconciled.length - news.length : 0;
 
-  // bepaal welke aandacht nodig hebben (geen regel, of regel naar note-post)
+  // welke hebben aandacht nodig (geen regel, of regel naar note-post)
   const prepared = useMemo(() => {
     if (!parsed) return { auto: [], queue: [] };
     const auto = [], queue = [];
@@ -743,13 +1093,13 @@ function Import({ categories, groups, rules, existingHashes, onCommit }) {
       else queue.push(tx);
     }
     return { auto, queue };
-  }, [parsed]);
+  }, [parsed, rules, categories]);
 
   const finish = (decisions, learnedRules) => {
     const committed = [...prepared.auto.map((a) => ({ ...a.tx, allocations: [{ categoryId: a.categoryId, amountCents: a.tx.amountCents }] }))];
     for (const tx of prepared.queue) {
       const d = decisions[tx.id];
-      if (!d) continue; // overgeslagen
+      if (!d) continue;
       committed.push({ ...tx, allocations: [{ categoryId: d.categoryId, amountCents: tx.amountCents, note: d.note || undefined }] });
     }
     onCommit(committed, learnedRules);
@@ -760,12 +1110,23 @@ function Import({ categories, groups, rules, existingHashes, onCommit }) {
   if (phase === "upload") return (
     <div>
       <SectionTitle>Importeren — je ING-CSV</SectionTitle>
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={(e) => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]); }}
+        onClick={() => fileRef.current && fileRef.current.click()}
+        style={{ border: `2px dashed ${drag ? T.accent : T.line}`, background: drag ? T.accentSoft : T.panel, borderRadius: T.radius, padding: "22px 18px", marginBottom: 14, cursor: "pointer", textAlign: "center" }}
+      >
+        <input ref={fileRef} type="file" accept=".csv,.txt" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
+        <div style={{ fontSize: 14, fontWeight: 600 }}>Sleep je ING-CSV hierheen</div>
+        <div style={{ fontSize: 12, color: T.sub, marginTop: 3 }}>of klik om je gedownloade bestand te kiezen</div>
+      </div>
       <Card style={{ padding: 16 }}>
-        <div style={{ fontSize: 13, color: T.sub, marginBottom: 8 }}>Open je ING-export, kopieer de inhoud en plak die hieronder. Of laad het meegeleverde voorbeeld van je eigen afschrift.</div>
-        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={8} placeholder="Datum;Naam / Omschrijving;Rekening;Tegenrekening;…"
+        <div style={{ fontSize: 13, color: T.sub, marginBottom: 8 }}>Of plak de inhoud van je ING-export hieronder.</div>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={6} placeholder="Datum;Naam / Omschrijving;Rekening;Tegenrekening;…"
           style={{ width: "100%", boxSizing: "border-box", fontFamily: T.mono, fontSize: 12, padding: 10, border: `1px solid ${T.line}`, borderRadius: 7, outline: "none" }} />
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-          <Btn onClick={run} disabled={!text.trim()}>Verwerk bestand</Btn>
+          <Btn onClick={run} disabled={!text.trim()}>Verwerk</Btn>
           <Btn variant="secondary" onClick={() => setText(SAMPLE_CSV)}>Laad mijn ING-voorbeeld</Btn>
         </div>
       </Card>
@@ -776,22 +1137,27 @@ function Import({ categories, groups, rules, existingHashes, onCommit }) {
     <div>
       <SectionTitle>Importeren — overzicht</SectionTitle>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <Banner tone="neutral"><b>{news.length}</b> nieuwe transacties · <b>{dupCount}</b> duplicaten overgeslagen</Banner>
+        <Banner tone="neutral"><b>{news.length}</b> nieuw · <b>{dupCount}</b> al eerder geïmporteerd</Banner>
         {parsed.errors.length > 0 && <Banner tone="warn">{parsed.errors.length} regel(s) niet gelezen</Banner>}
       </div>
-      <Card style={{ padding: 18, marginBottom: 16 }}>
-        <div style={{ fontSize: 14, lineHeight: 1.7 }}>
-          <div><b style={{ color: T.pos }}>{prepared.auto.length}</b> transacties zijn automatisch herkend door je regels — die hoef je niet na te lopen.</div>
-          <div><b style={{ color: T.warn }}>{prepared.queue.length}</b> transacties hebben je aandacht nodig: een post kiezen, of een opmerking toevoegen.</div>
-        </div>
-      </Card>
+      {news.length === 0 ? (
+        <Card style={{ padding: 18, marginBottom: 16 }}><div style={{ fontSize: 14 }}>Alle transacties in dit bestand waren al eerder ingelezen — er is niets nieuws om te verwerken.</div></Card>
+      ) : (
+        <Card style={{ padding: 18, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, lineHeight: 1.7 }}>
+            <div><b style={{ color: T.pos }}>{prepared.auto.length}</b> automatisch herkend door je regels — die hoef je niet na te lopen.</div>
+            <div><b style={{ color: T.warn }}>{prepared.queue.length}</b> hebben je aandacht nodig: een post kiezen of een opmerking toevoegen.</div>
+          </div>
+        </Card>
+      )}
       <div style={{ display: "flex", gap: 8 }}>
         {prepared.queue.length > 0
           ? <Btn onClick={() => setPhase("review")}>Begin met nalopen ({prepared.queue.length})</Btn>
-          : <Btn onClick={() => finish({}, [])}>Verwerk {prepared.auto.length} transacties</Btn>}
+          : news.length > 0
+            ? <Btn onClick={() => finish({}, [])}>Verwerk {prepared.auto.length} transacties</Btn>
+            : null}
         <Btn variant="secondary" onClick={() => { setParsed(null); setPhase("upload"); }}>Terug</Btn>
       </div>
-      {phase === "review" && null}
     </div>
   );
 
@@ -803,12 +1169,75 @@ function Import({ categories, groups, rules, existingHashes, onCommit }) {
     </div>
   );
 
-  // done
   return (
     <div>
       <SectionTitle>Importeren — klaar</SectionTitle>
-      <Banner tone="ok">{result.count} transacties verwerkt ({result.auto} automatisch herkend){result.rules > 0 ? `, en ${result.rules} nieuwe regel${result.rules > 1 ? "s" : ""} geleerd voor de volgende keer` : ""}. Je overzicht is bijgewerkt.</Banner>
+      <Banner tone="ok">{result.count} transactie(s) verwerkt ({result.auto} automatisch herkend){result.rules > 0 ? `, en ${result.rules} nieuwe regel(s) geleerd voor de volgende keer` : ""}. Je overzicht en uitgaven zijn bijgewerkt.</Banner>
       <div style={{ marginTop: 14 }}><Btn variant="secondary" onClick={() => { setText(""); setParsed(null); setResult(null); setPhase("upload"); }}>Nog een bestand importeren</Btn></div>
+    </div>
+  );
+}
+
+/* ===================================================================== APP */
+function YearSwitcher({ years, activeYearId, onSelect, onNew }) {
+  const sorted = [...years].sort((a, b) => a.jaartal - b.jaartal);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      {sorted.map((y) => {
+        const on = y.id === activeYearId;
+        return (
+          <button key={y.id} onClick={() => onSelect(y.id)} style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${on ? T.accent : T.line}`, background: on ? T.accentSoft : T.panel, color: on ? T.accent : T.sub, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: T.mono }}>{y.jaartal}</button>
+        );
+      })}
+      <button onClick={onNew} title="Nieuw begrotingsjaar opstellen" style={{ padding: "5px 11px", borderRadius: 8, border: `1px dashed ${T.line}`, background: T.panel, color: T.sub, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ jaar</button>
+    </div>
+  );
+}
+
+function NewYearDialog({ years, budgets, categories, transactions, onCreate, onClose }) {
+  const maxY = Math.max(...years.map((y) => y.jaartal));
+  const [jaartal, setJaartal] = useState(maxY + 1);
+  const [basis, setBasis] = useState("copy");
+  const exists = years.some((y) => y.jaartal === Number(jaartal));
+  const prevBudget = budgetTotals(categories, applySluitpost(categories, budgets[String(maxY)] || {}));
+  const prevActuals = txYearActuals(transactions, categories, maxY);
+  const prevSpent = prevActuals.reduce((s, a) => s + a.expense, 0);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(16,24,22,0.55)", display: "grid", placeItems: "center", zIndex: 70, padding: 16 }}>
+      <Card onClick={(e) => e.stopPropagation()} style={{ padding: 24, width: "100%", maxWidth: 470, background: T.panel }}>
+        <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 6 }}>Nieuw begrotingsjaar opstellen</div>
+        <div style={{ fontSize: 13, color: T.sub, lineHeight: 1.6, marginBottom: 16 }}>
+          De beste aanpak: <b>neem vorig jaar als basis</b> en pas posten aan op wat je werkelijk uitgaf en op bekende veranderingen — een nieuwe verzekering, hogere energie, een kind erbij. De sluitpost houdt het automatisch kloppend.
+        </div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
+          <div style={{ flex: 1, padding: "10px 12px", background: T.bg, borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: T.sub, marginBottom: 3 }}>{maxY} begroot (uit&sparen)</div>
+            <Money cents={prevBudget.outflow} bold size={16} />
+          </div>
+          <div style={{ flex: 1, padding: "10px 12px", background: T.bg, borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: T.sub, marginBottom: 3 }}>{maxY} werkelijk uitgegeven</div>
+            <Money cents={prevSpent} bold size={16} />
+          </div>
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, color: T.sub, marginBottom: 6 }}>Welk jaar?</div>
+          <input type="number" value={jaartal} onChange={(e) => setJaartal(e.target.value)} style={{ ...inputStyle, width: 140 }} />
+          {exists && <div style={{ fontSize: 12, color: T.warn, marginTop: 6 }}>Dat jaar bestaat al — je gaat ernaartoe.</div>}
+        </div>
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 12, color: T.sub, marginBottom: 6 }}>Beginpunt</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["copy", `Neem ${maxY} over`], ["empty", "Begin leeg"]].map(([v, lbl]) => {
+              const on = basis === v;
+              return <button key={v} onClick={() => setBasis(v)} disabled={exists} style={{ flex: 1, padding: "10px", borderRadius: 8, cursor: exists ? "default" : "pointer", fontSize: 13, fontWeight: 600, border: `1px solid ${on ? T.accent : T.line}`, background: on ? T.accentSoft : T.panel, color: on ? T.accent : T.sub, opacity: exists ? 0.5 : 1 }}>{lbl}</button>;
+            })}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <Btn variant="secondary" onClick={onClose}>Annuleren</Btn>
+          <Btn onClick={() => onCreate(Number(jaartal), basis)}>{exists ? "Ga naar jaar" : "Jaar aanmaken"}</Btn>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -822,6 +1251,25 @@ const pwBtn = (disabled) => ({ flex: 1, padding: "10px 14px", fontSize: 14, font
 function fmtWhen(at) {
   try { return new Date(at).toLocaleString("nl-NL", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); }
   catch { return ""; }
+}
+function mergeSeed(state) {
+  const seed = buildSeed();
+  const cats = [...(state.categories || [])];
+  const haveCat = new Set(cats.map((c) => c.id));
+  for (const c of seed.categories) if (!haveCat.has(c.id)) cats.push(c);
+  const grps = [...(state.groups || [])];
+  const haveGrp = new Set(grps.map((g) => g.id));
+  for (const g of seed.groups) if (!haveGrp.has(g.id)) grps.push(g);
+  // migratie: oud enkel-jaar-model -> jaren-lijst
+  let years = state.years, activeYearId = state.activeYearId;
+  if (!Array.isArray(years) || !years.length) {
+    if (state.year && state.year.id) { years = [state.year]; activeYearId = state.year.id; }
+    else { years = seed.years; activeYearId = seed.activeYearId; }
+  }
+  if (!activeYearId || !years.some((y) => y.id === activeYearId)) activeYearId = years[0].id;
+  const merged = { ...seed, ...state, categories: cats, groups: grps, years, activeYearId };
+  delete merged.year;
+  return merged;
 }
 
 /* ----------------------------------------------------------- Activiteit */
@@ -927,14 +1375,16 @@ function LoginScreen({ onSuccess }) {
 
 /* ----------------------------------------------------------- Werkruimte */
 function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
-  const { groups, categories, year, budgets, pots, rules, transactions } = state;
+  const { groups, categories, years, activeYearId, budgets, pots, rules, transactions } = state;
   const [tab, setTab] = useState("overzicht");
   const [showChangePw, setShowChangePw] = useState(false);
+  const [showNewYear, setShowNewYear] = useState(false);
 
+  const year = years.find((y) => y.id === activeYearId) || years[0];
   const catById = useCallback((id) => categories.find((c) => c.id === id), [categories]);
 
   const derived = useMemo(() => {
-    const lines = budgets[year.id] || {};
+    const lines = applySluitpost(categories, budgets[year.id] || {});
     const budgetNet = Array.from({ length: 12 }, () => 0);
     const beLines = [];
     for (const c of categories) {
@@ -944,9 +1394,10 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     }
     const breakEven = computeBreakEven(beLines);
 
+    const yearTx = transactions.filter((t) => yearOf(t.date) === year.jaartal);
     const actuals = Array.from({ length: 12 }, () => ({ income: 0, expense: 0 }));
     let currentMonth = 1;
-    for (const t of transactions) {
+    for (const t of yearTx) {
       const m = monthOf(t.date); currentMonth = Math.max(currentMonth, m);
       for (const a of t.allocations) {
         const cat = catById(a.categoryId);
@@ -970,7 +1421,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
       if (c.type !== "expense") continue;
       const line = lines[c.id]; if (!line) continue;
       let actual = 0;
-      for (const t of transactions) { if (monthOf(t.date) > currentMonth) continue; for (const a of t.allocations) if (a.categoryId === c.id) actual += Math.abs(a.amountCents); }
+      for (const t of yearTx) { if (monthOf(t.date) > currentMonth) continue; for (const a of t.allocations) if (a.categoryId === c.id) actual += Math.abs(a.amountCents); }
       const budgetYTD = sumMonths(line.months.slice(0, currentMonth));
       if (actual > budgetYTD && budgetYTD > 0) signals.push({ tone: "warn", text: `${c.naam.split(":")[0]}: ${formatEUR(actual)} besteed t/m maand ${currentMonth}, begroot ${formatEUR(budgetYTD)}.` });
     }
@@ -981,22 +1432,93 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     return { breakEven, monthRows, vitals, signals, currentMonth, existingHashes };
   }, [budgets, year, categories, transactions, pots, catById]);
 
-  const saveLine = (catId, average, months) =>
-    setState((s) => ({ ...s, budgets: { ...s.budgets, [s.year.id]: { ...(s.budgets[s.year.id] || {}), [catId]: { average, months } } } }));
+  const prevYear = years.find((y) => y.jaartal === year.jaartal - 1) || null;
+  const prevActualByCat = useMemo(() => {
+    if (!prevYear) return null;
+    const map = {};
+    for (const t of transactions) {
+      if (yearOf(t.date) !== prevYear.jaartal) continue;
+      for (const a of t.allocations) { if (!map[a.categoryId]) map[a.categoryId] = 0; map[a.categoryId] += Math.abs(a.amountCents); }
+    }
+    return map;
+  }, [transactions, prevYear]);
+
+  const saveLine = (catId, average, months) => setState((s) => {
+    const yid = s.activeYearId;
+    const lines = { ...(s.budgets[yid] || {}), [catId]: { average, months } };
+    return { ...s, budgets: { ...s.budgets, [yid]: applySluitpost(s.categories, lines) } };
+  });
+  const onImportBudget = (updates) => {
+    setState((s) => {
+      const yid = s.activeYearId;
+      const lines = { ...(s.budgets[yid] || {}) };
+      for (const [catId, avg] of Object.entries(updates)) lines[catId] = { average: avg, months: distributeEven(avg) };
+      return { ...s, budgets: { ...s.budgets, [yid]: applySluitpost(s.categories, lines) } };
+    });
+    logAction(`begroting bijgewerkt via bestand: ${Object.keys(updates).length} post(en)`);
+  };
+  const onAddDefaults = () => {
+    setState((s) => {
+      const seedRules = buildSeed().rules;
+      const exists = (sr) => s.rules.some((x) => x.categoryId === sr.categoryId && x.conditions[0]?.field === sr.conditions[0]?.field && x.conditions[0]?.value === sr.conditions[0]?.value);
+      const toAdd = seedRules.filter((sr) => !exists(sr)).map((sr) => ({ ...sr, id: "rs" + Math.random().toString(36).slice(2, 8) }));
+      return { ...s, rules: [...s.rules, ...toAdd] };
+    });
+    logAction("standaardregels toegevoegd");
+  };
   const toggleNote = (id) => {
     setState((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, noteSuggested: !c.noteSuggested } : c)) }));
     const c = categories.find((x) => x.id === id); logAction(`post-instelling gewijzigd: ${(c || {}).naam || id}`);
   };
+  const addCategory = (groupId, naam, type) => {
+    setState((s) => {
+      const base = slug(naam) || "post"; let id = base, i = 2;
+      while (s.categories.some((c) => c.id === id)) id = base + "-" + i++;
+      return { ...s, categories: [...s.categories, { id, naam, groupId, type, noteSuggested: false }] };
+    });
+    logAction(`post toegevoegd: ${naam}`);
+  };
+  const updateCategory = (id, patch) => setState((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
+  const deleteCategory = (id) => {
+    if (id === SLUITPOST_ID) return;
+    setState((s) => {
+      const remaining = s.categories.filter((c) => c.id !== id);
+      const nb = {};
+      for (const [yid, lines] of Object.entries(s.budgets)) { const nl = { ...lines }; delete nl[id]; nb[yid] = applySluitpost(remaining, nl); }
+      return { ...s, categories: remaining, budgets: nb };
+    });
+    const c = categories.find((x) => x.id === id); logAction(`post verwijderd: ${(c || {}).naam || id}`);
+  };
   const toggleRule = (id) => { setState((s) => ({ ...s, rules: s.rules.map((x) => (x.id === id ? { ...x, active: !x.active } : x)) })); logAction("regel aan-/uitgezet"); };
   const deleteRule = (id) => { setState((s) => ({ ...s, rules: s.rules.filter((x) => x.id !== id) })); logAction("regel verwijderd"); };
+  const updateRule = (id, patch) => setState((s) => ({ ...s, rules: s.rules.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+  const addRule = (rule) => { setState((s) => ({ ...s, rules: [...s.rules, { ...rule, id: "ru" + Math.random().toString(36).slice(2, 8), active: true }] })); logAction("regel toegevoegd"); };
   const commitImport = (txns, newRules) => {
     setState((s) => ({ ...s, transactions: [...s.transactions, ...txns], rules: newRules && newRules.length ? [...s.rules, ...newRules] : s.rules }));
     logAction(`${txns.length} transactie(s) geïmporteerd${newRules && newRules.length ? `, ${newRules.length} regel(s) geleerd` : ""}`);
+  };
+  const setActiveYear = (id) => setState((s) => ({ ...s, activeYearId: id }));
+  const createYear = (jaartal, basis) => {
+    const id = String(jaartal);
+    if (years.some((y) => y.id === id)) { setActiveYear(id); setShowNewYear(false); setTab("begroting"); return; }
+    setState((s) => {
+      const latest = [...s.years].sort((a, b) => b.jaartal - a.jaartal)[0];
+      const acts = txYearActuals(s.transactions, s.categories, latest.jaartal);
+      const end = computeRunningSaldo(latest.carryInCents, acts)[11].end;
+      const newYear = { id, jaartal, carryInCents: end, status: "open" };
+      let nb = {};
+      if (basis === "copy") { const src = s.budgets[latest.id] || {}; for (const [cid, l] of Object.entries(src)) nb[cid] = { average: l.average, months: l.months.slice() }; }
+      nb = applySluitpost(s.categories, nb);
+      return { ...s, years: [...s.years, newYear], budgets: { ...s.budgets, [id]: nb }, activeYearId: id };
+    });
+    setShowNewYear(false); setTab("begroting");
+    logAction(`nieuw begrotingsjaar ${jaartal} aangemaakt`);
   };
 
   const nav = [
     ["overzicht", "Overzicht", icons.overzicht],
     ["begroting", "Begroting", icons.begroting],
+    ["uitgaven", "Uitgaven", icons.uitgaven],
     ["posten", "Posten", icons.posten],
     ["import", "Import", icons.import],
     ["regels", "Regels", icons.regels],
@@ -1035,18 +1557,19 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
               <div style={{ fontSize: 11, color: T.sub, marginBottom: 2 }}>{label}</div>{node}
             </div>
           ))}
-          <div style={{ marginLeft: "auto", padding: "12px 22px", alignSelf: "center", fontSize: 12, color: T.sub, textAlign: "right" }}>
-            <div>Jaar {year.jaartal}</div>
-            {meta && meta.updatedBy && <div style={{ fontSize: 11 }}>laatst bijgewerkt door {meta.updatedBy}</div>}
+          <div style={{ marginLeft: "auto", padding: "10px 18px", alignSelf: "center", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+            <YearSwitcher years={years} activeYearId={activeYearId} onSelect={setActiveYear} onNew={() => setShowNewYear(true)} />
+            {meta && meta.updatedBy && <div style={{ fontSize: 11, color: T.sub }}>laatst bijgewerkt door {meta.updatedBy}</div>}
           </div>
         </div>
 
         <div style={{ padding: "24px 28px", maxWidth: 1080 }}>
           {tab === "overzicht" && <Overzicht vitals={derived.vitals} signals={derived.signals} breakEven={derived.breakEven} monthRows={derived.monthRows} currentMonth={derived.currentMonth} />}
-          {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} breakEven={derived.breakEven} />}
-          {tab === "posten" && <Posten groups={groups} categories={categories} onToggleNote={toggleNote} />}
+          {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} prevYear={prevYear} prevActualByCat={prevActualByCat} />}
+          {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} transactions={transactions} onAddCategory={addCategory} />}
+          {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
           {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} onCommit={commitImport} />}
-          {tab === "regels" && <Regels rules={rules} categories={categories} onToggle={toggleRule} onDelete={deleteRule} />}
+          {tab === "regels" && <Regels rules={rules} categories={categories} groups={groups} onToggle={toggleRule} onDelete={deleteRule} onUpdate={updateRule} onAdd={addRule} onAddDefaults={onAddDefaults} />}
           {tab === "activiteit" && <Activiteit />}
         </div>
       </main>
@@ -1058,6 +1581,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
           </div>
         </div>
       )}
+      {showNewYear && <NewYearDialog years={years} budgets={budgets} categories={categories} transactions={transactions} onCreate={createYear} onClose={() => setShowNewYear(false)} />}
     </div>
   );
 }
@@ -1077,6 +1601,7 @@ export default function App() {
     setDbReady(!!r.db);
     let s = r.state;
     if (!s) { s = buildSeed(); try { await putState(s); } catch {} }
+    else s = mergeSeed(s);
     setState(s);
     setMeta({ updatedBy: r.updatedBy, updatedAt: r.updatedAt });
     loadedRef.current = true;
@@ -1094,7 +1619,6 @@ export default function App() {
     })();
   }, [load]);
 
-  // toestand bewaren (debounced) zodra die wijzigt
   useEffect(() => {
     if (phase !== "ready" || !loadedRef.current || !state) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);

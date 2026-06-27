@@ -79,3 +79,11 @@ npm start          # http://localhost:3000
 ```
 
 Zonder `DATABASE_URL` werkt alles, maar wordt er niets blijvend opgeslagen.
+
+## Nieuw: meerdere jaren, eigen posten en zelf regels beheren
+
+- **Jaar-schakelaar** rechtsboven: wissel tussen begrotingsjaren. Met **+ jaar** open je de assistent voor een nieuw begrotingsjaar.
+- **Nieuw-jaar-assistent**: neemt vorig jaar als basis over en toont per post wat je vorig jaar werkelijk uitgaf, als ijkpunt. Het beginsaldo (carry-in) wordt automatisch overgenomen uit het eindsaldo van het vorige jaar.
+- **Eigen posten**: voeg posten toe met **+ nieuwe post** in Begroting, Uitgaven of Posten. In **Posten** kun je hernoemen, het type wijzigen en (lege) posten verwijderen.
+- **Regels zelf maken/aanpassen**: in **Regels** maak je met **+ Nieuwe regel** eigen herkenningsregels en pas je bestaande inline aan.
+- **Automatische migratie**: bestaande opgeslagen data (met één jaar) wordt bij het laden automatisch omgezet naar de nieuwe jaren-structuur. Je hoeft niets handmatig te doen.
