@@ -1,30 +1,19 @@
 {
-  "name": "finance-app",
-  "version": "0.1.0",
+  "name": "huishoudboekje",
+  "version": "1.0.0",
   "private": true,
-  "description": "Persoonlijk financieel besturingssysteem — fase 1 (fundament).",
   "type": "module",
-  "workspaces": [
-    "packages/*",
-    "apps/*"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
-    "test": "npm run test --workspace packages/domain",
-    "typecheck": "tsc -b",
-    "db:migrate": "npm run db:migrate --workspace apps/api",
-    "db:seed": "npm run db:seed --workspace apps/api",
-    "hash-password": "npm run hash-password --workspace apps/api",
-    "dev:api": "npm run dev --workspace apps/api",
-    "dev:web": "npm run dev --workspace apps/web",
-    "build": "npm run build --workspace apps/web",
-    "start": "npm run start --workspace apps/api"
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server.js"
   },
-  "devDependencies": {
-    "@types/node": "^22.10.0",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.2",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.8"
   }
 }
