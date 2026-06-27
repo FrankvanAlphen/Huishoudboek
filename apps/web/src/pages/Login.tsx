@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { api } from "./api";
-import { tokens } from "./tokens";
+import { api } from "../api";
+import { tokens } from "../tokens";
 
 export function Login({ onSuccess }: { onSuccess: () => void }) {
   const [password, setPassword] = useState("");

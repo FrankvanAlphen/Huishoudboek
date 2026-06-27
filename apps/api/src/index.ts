@@ -17,7 +17,9 @@ import { requireAuth } from "./auth.js";
 
 const app = express();
 
-app.use(helmet());
+// CSP uit: de Vite-build laadt eigen scripts/styles en React zet inline-styles via
+// het DOM; de standaard-CSP blokkeert dat in productie. Overige helmet-headers blijven.
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
