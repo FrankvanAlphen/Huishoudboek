@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { me, login as apiLogin, logout as apiLogout, getState, putState } from "./api.js";
+import { me, getUsers, login as apiLogin, changePassword as apiChangePassword, logout as apiLogout, getState, putState, getActivity, logAction } from "./api.js";
 
 /**
  * Huishoudboekje — testprototype (fase 2 + 3) in één React-bestand.
@@ -814,11 +814,122 @@ function Import({ categories, groups, rules, existingHashes, onCommit }) {
 }
 
 /* ===================================================================== */
-/* WERKRUIMTE — de volledige app, nu gevoed vanuit gedeelde toestand      */
+/* AUTHENTICATIE, LOGBOEK & WERKRUIMTE                                    */
 /* ===================================================================== */
-function Workspace({ state, setState, dbReady, onLogout }) {
+
+const pwInput = (err) => ({ width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 14, border: `1px solid ${err ? T.neg : T.line}`, borderRadius: 8, outline: "none", marginBottom: 10 });
+const pwBtn = (disabled) => ({ flex: 1, padding: "10px 14px", fontSize: 14, fontWeight: 700, border: "none", borderRadius: 8, cursor: disabled ? "default" : "pointer", background: disabled ? "#9ec5c0" : T.accent, color: "#fff" });
+function fmtWhen(at) {
+  try { return new Date(at).toLocaleString("nl-NL", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); }
+  catch { return ""; }
+}
+
+/* ----------------------------------------------------------- Activiteit */
+function Activiteit() {
+  const [items, setItems] = useState(null);
+  useEffect(() => {
+    let on = true;
+    getActivity().then((r) => on && setItems(r.activity || [])).catch(() => on && setItems([]));
+    return () => { on = false; };
+  }, []);
+  return (
+    <div>
+      <SectionTitle>Activiteit</SectionTitle>
+      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Hier zie je wie wat heeft gedaan: inloggen, importeren, de begroting en regels aanpassen, en wachtwoordwijzigingen.</Banner></div>
+      <Card style={{ overflow: "hidden" }}>
+        {items === null && <div style={{ padding: 16, fontSize: 13, color: T.sub }}>Bezig met laden…</div>}
+        {items && items.length === 0 && <div style={{ padding: 16, fontSize: 13, color: T.sub }}>Nog geen activiteit vastgelegd.</div>}
+        {items && items.map((it, i) => (
+          <div key={i} style={{ display: "grid", gridTemplateColumns: "160px 1fr 130px", gap: 10, alignItems: "center", padding: "10px 16px", borderTop: i ? `1px solid ${T.line}` : "none" }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{it.displayName}</span>
+            <span style={{ fontSize: 13 }}>{it.action}</span>
+            <span style={{ fontSize: 12, color: T.sub, textAlign: "right", fontFamily: T.mono }}>{fmtWhen(it.at)}</span>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+/* ------------------------------------------------ Wachtwoord wijzigen */
+function ChangePasswordCard({ displayName, forced, onDone, onCancel }) {
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (pw1.length < 8) { setErr("Kies minstens 8 tekens."); return; }
+    if (pw1 !== pw2) { setErr("De twee wachtwoorden zijn niet gelijk."); return; }
+    setBusy(true); setErr("");
+    try { await apiChangePassword(pw1); onDone(); }
+    catch { setErr("Wijzigen mislukt, probeer het opnieuw."); setBusy(false); }
+  };
+  return (
+    <div style={{ width: "100%", maxWidth: 380 }}>
+      <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 6 }}>{forced ? `Welkom, ${displayName}` : "Wachtwoord wijzigen"}</div>
+      <div style={{ fontSize: 13, color: T.sub, marginBottom: 16 }}>{forced ? "Kies bij de eerste keer inloggen een eigen, nieuw wachtwoord (minstens 8 tekens)." : "Kies een nieuw wachtwoord (minstens 8 tekens)."}</div>
+      <input type="password" autoFocus value={pw1} onChange={(e) => setPw1(e.target.value)} placeholder="Nieuw wachtwoord" style={pwInput(false)} />
+      <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Herhaal nieuw wachtwoord" style={pwInput(false)} />
+      {err && <div style={{ fontSize: 12, color: T.neg, marginBottom: 10 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={submit} disabled={busy} style={pwBtn(busy)}>{busy ? "Bezig…" : "Opslaan"}</button>
+        {!forced && <button onClick={onCancel} style={{ ...pwBtn(false), background: T.panel, color: T.sub, border: `1px solid ${T.line}` }}>Annuleren</button>}
+      </div>
+    </div>
+  );
+}
+function ChangePasswordScreen({ user, onDone }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, fontFamily: T.sans, color: T.ink, padding: 16 }}>
+      <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 14, padding: 28, boxShadow: "0 8px 30px rgba(0,0,0,0.06)" }}>
+        <ChangePasswordCard displayName={user.displayName} forced onDone={onDone} />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- Inlogscherm */
+function LoginScreen({ onSuccess }) {
+  const [users, setUsers] = useState([]);
+  const [username, setUsername] = useState("");
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    getUsers().then((r) => { setUsers(r.users || []); if (r.users && r.users[0]) setUsername(r.users[0].username); }).catch(() => {});
+  }, []);
+  const submit = async () => {
+    if (!username || !pw) return;
+    setBusy(true); setErr("");
+    try { const r = await apiLogin(username, pw); onSuccess(r); }
+    catch { setErr("Onjuiste gebruiker of wachtwoord."); setBusy(false); }
+  };
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, fontFamily: T.sans, color: T.ink, padding: 16 }}>
+      <div style={{ width: "100%", maxWidth: 380, background: T.panel, border: `1px solid ${T.line}`, borderRadius: 14, padding: 28, boxShadow: "0 8px 30px rgba(0,0,0,0.06)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+          <div style={{ width: 34, height: 34, borderRadius: 9, background: T.accent, display: "grid", placeItems: "center", color: "#fff", fontWeight: 800 }}>€</div>
+          <div style={{ fontWeight: 700, fontSize: 17 }}>Huishoudboekje</div>
+        </div>
+        <div style={{ fontSize: 13, color: T.sub, marginBottom: 10 }}>Wie ben je?</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {users.map((u) => (
+            <button key={u.username} onClick={() => { setUsername(u.username); setErr(""); }} style={{ flex: 1, padding: "10px 8px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600, border: `1px solid ${username === u.username ? T.accent : T.line}`, background: username === u.username ? T.accentSoft : T.panel, color: username === u.username ? T.accent : T.sub }}>{u.displayName}</button>
+          ))}
+        </div>
+        <input type="password" value={pw} autoFocus onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Wachtwoord" style={pwInput(!!err)} />
+        {err && <div style={{ fontSize: 12, color: T.neg, marginBottom: 10 }}>{err}</div>}
+        <button onClick={submit} disabled={busy || !pw || !username} style={pwBtn(busy || !pw || !username)}>{busy ? "Bezig…" : "Inloggen"}</button>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- Werkruimte */
+function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const { groups, categories, year, budgets, pots, rules, transactions } = state;
   const [tab, setTab] = useState("overzicht");
+  const [showChangePw, setShowChangePw] = useState(false);
 
   const catById = useCallback((id) => categories.find((c) => c.id === id), [categories]);
 
@@ -872,11 +983,16 @@ function Workspace({ state, setState, dbReady, onLogout }) {
 
   const saveLine = (catId, average, months) =>
     setState((s) => ({ ...s, budgets: { ...s.budgets, [s.year.id]: { ...(s.budgets[s.year.id] || {}), [catId]: { average, months } } } }));
-  const toggleNote = (id) => setState((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, noteSuggested: !c.noteSuggested } : c)) }));
-  const toggleRule = (id) => setState((s) => ({ ...s, rules: s.rules.map((x) => (x.id === id ? { ...x, active: !x.active } : x)) }));
-  const deleteRule = (id) => setState((s) => ({ ...s, rules: s.rules.filter((x) => x.id !== id) }));
-  const commitImport = (txns, newRules) =>
+  const toggleNote = (id) => {
+    setState((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, noteSuggested: !c.noteSuggested } : c)) }));
+    const c = categories.find((x) => x.id === id); logAction(`post-instelling gewijzigd: ${(c || {}).naam || id}`);
+  };
+  const toggleRule = (id) => { setState((s) => ({ ...s, rules: s.rules.map((x) => (x.id === id ? { ...x, active: !x.active } : x)) })); logAction("regel aan-/uitgezet"); };
+  const deleteRule = (id) => { setState((s) => ({ ...s, rules: s.rules.filter((x) => x.id !== id) })); logAction("regel verwijderd"); };
+  const commitImport = (txns, newRules) => {
     setState((s) => ({ ...s, transactions: [...s.transactions, ...txns], rules: newRules && newRules.length ? [...s.rules, ...newRules] : s.rules }));
+    logAction(`${txns.length} transactie(s) geïmporteerd${newRules && newRules.length ? `, ${newRules.length} regel(s) geleerd` : ""}`);
+  };
 
   const nav = [
     ["overzicht", "Overzicht", icons.overzicht],
@@ -884,6 +1000,7 @@ function Workspace({ state, setState, dbReady, onLogout }) {
     ["posten", "Posten", icons.posten],
     ["import", "Import", icons.import],
     ["regels", "Regels", icons.regels],
+    ["activiteit", "Activiteit", <><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 14" /></>],
   ];
 
   return (
@@ -899,7 +1016,9 @@ function Workspace({ state, setState, dbReady, onLogout }) {
           </button>
         ))}
         <div style={{ position: "absolute", bottom: 16, left: 14, right: 14 }}>
-          <button onClick={onLogout} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Uitloggen</button>
+          <div style={{ fontSize: 12, color: T.ink, fontWeight: 600, marginBottom: 8 }}>Ingelogd als {user.displayName}</div>
+          <button onClick={() => setShowChangePw(true)} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Wachtwoord wijzigen</button>
+          <button onClick={onLogout} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600 }}>Uitloggen</button>
           <div style={{ fontSize: 11, color: T.sub, marginTop: 10, display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: dbReady ? T.pos : T.warn }} />
             {dbReady ? "Opgeslagen in database" : "Tijdelijk geheugen"}
@@ -916,7 +1035,10 @@ function Workspace({ state, setState, dbReady, onLogout }) {
               <div style={{ fontSize: 11, color: T.sub, marginBottom: 2 }}>{label}</div>{node}
             </div>
           ))}
-          <div style={{ marginLeft: "auto", padding: "12px 22px", alignSelf: "center", fontSize: 12, color: T.sub }}>Jaar {year.jaartal}</div>
+          <div style={{ marginLeft: "auto", padding: "12px 22px", alignSelf: "center", fontSize: 12, color: T.sub, textAlign: "right" }}>
+            <div>Jaar {year.jaartal}</div>
+            {meta && meta.updatedBy && <div style={{ fontSize: 11 }}>laatst bijgewerkt door {meta.updatedBy}</div>}
+          </div>
         </div>
 
         <div style={{ padding: "24px 28px", maxWidth: 1080 }}>
@@ -925,63 +1047,40 @@ function Workspace({ state, setState, dbReady, onLogout }) {
           {tab === "posten" && <Posten groups={groups} categories={categories} onToggleNote={toggleNote} />}
           {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} onCommit={commitImport} />}
           {tab === "regels" && <Regels rules={rules} categories={categories} onToggle={toggleRule} onDelete={deleteRule} />}
+          {tab === "activiteit" && <Activiteit />}
         </div>
       </main>
-    </div>
-  );
-}
 
-/* ----------------------------------------------------------- Inlogscherm */
-function LoginScreen({ onSuccess }) {
-  const [pw, setPw] = useState("");
-  const [err, setErr] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const submit = async () => {
-    if (!pw) return;
-    setBusy(true); setErr(false);
-    try { await apiLogin(pw); onSuccess(); }
-    catch { setErr(true); setBusy(false); }
-  };
-  return (
-    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, fontFamily: T.sans, color: T.ink }}>
-      <div style={{ width: "100%", maxWidth: 360, background: T.panel, border: `1px solid ${T.line}`, borderRadius: 14, padding: 28, boxShadow: "0 8px 30px rgba(0,0,0,0.06)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 9, background: T.accent, display: "grid", placeItems: "center", color: "#fff", fontWeight: 800 }}>€</div>
-          <div style={{ fontWeight: 700, fontSize: 17 }}>Huishoudboekje</div>
+      {showChangePw && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,22,0.55)", display: "grid", placeItems: "center", zIndex: 60, padding: 16 }}>
+          <div style={{ background: T.panel, borderRadius: 14, padding: 28, boxShadow: "0 12px 40px rgba(0,0,0,0.25)" }}>
+            <ChangePasswordCard displayName={user.displayName} onCancel={() => setShowChangePw(false)} onDone={() => setShowChangePw(false)} />
+          </div>
         </div>
-        <div style={{ fontSize: 13, color: T.sub, marginBottom: 16 }}>Log in met het gezamenlijke wachtwoord.</div>
-        <input type="password" value={pw} autoFocus onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Wachtwoord" style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 14, border: `1px solid ${err ? T.neg : T.line}`, borderRadius: 8, outline: "none", marginBottom: 10 }} />
-        {err && <div style={{ fontSize: 12, color: T.neg, marginBottom: 10 }}>Onjuist wachtwoord. Probeer het opnieuw.</div>}
-        <button onClick={submit} disabled={busy || !pw} style={{ width: "100%", padding: "10px 14px", fontSize: 14, fontWeight: 700, border: "none", borderRadius: 8, cursor: busy || !pw ? "default" : "pointer", background: busy || !pw ? "#9ec5c0" : T.accent, color: "#fff" }}>
-          {busy ? "Bezig…" : "Inloggen"}
-        </button>
-      </div>
+      )}
     </div>
   );
 }
 
 /* ---------------------------------------------------- Laden & opslaan-shell */
 export default function App() {
-  const [phase, setPhase] = useState("loading"); // loading | login | ready
+  const [phase, setPhase] = useState("loading"); // loading | login | change | ready
+  const [user, setUser] = useState(null);
   const [state, setState] = useState(null);
   const [dbReady, setDbReady] = useState(false);
+  const [meta, setMeta] = useState(null);
   const loadedRef = useRef(false);
   const saveTimer = useRef(null);
 
   const load = useCallback(async () => {
-    try {
-      const r = await getState();
-      setDbReady(!!r.db);
-      let s = r.state;
-      if (!s) { s = buildSeed(); try { await putState(s); } catch {} }
-      setState(s);
-      loadedRef.current = true;
-      setPhase("ready");
-    } catch {
-      // niet ingelogd of fout → terug naar login
-      setPhase("login");
-    }
+    const r = await getState();
+    setDbReady(!!r.db);
+    let s = r.state;
+    if (!s) { s = buildSeed(); try { await putState(s); } catch {} }
+    setState(s);
+    setMeta({ updatedBy: r.updatedBy, updatedAt: r.updatedAt });
+    loadedRef.current = true;
+    setPhase("ready");
   }, []);
 
   useEffect(() => {
@@ -989,7 +1088,8 @@ export default function App() {
       try {
         const m = await me();
         setDbReady(!!m.db);
-        if (m.authed) await load(); else setPhase("login");
+        if (m.authed) { setUser(m.user); if (m.mustChange) setPhase("change"); else await load(); }
+        else setPhase("login");
       } catch { setPhase("login"); }
     })();
   }, [load]);
@@ -999,18 +1099,25 @@ export default function App() {
     if (phase !== "ready" || !loadedRef.current || !state) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      putState(state).then((r) => setDbReady(!!r.db)).catch(() => {});
+      putState(state).then((r) => { setDbReady(!!r.db); if (r.updatedBy) setMeta({ updatedBy: r.updatedBy, updatedAt: new Date().toISOString() }); }).catch(() => {});
     }, 700);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [state, phase]);
 
+  const onLoginSuccess = (r) => {
+    setUser(r.user); setDbReady(!!r.db);
+    if (r.mustChange) setPhase("change"); else load();
+  };
+  const onChangeDone = () => { load(); };
   const onLogout = async () => {
     try { await apiLogout(); } catch {}
-    setState(null); loadedRef.current = false; setPhase("login");
+    setUser(null); setState(null); loadedRef.current = false; setPhase("login");
   };
 
   if (phase === "loading")
     return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, color: T.sub, fontFamily: T.sans, fontSize: 14 }}>Bezig met laden…</div>;
-  if (phase === "login") return <LoginScreen onSuccess={load} />;
-  return <Workspace state={state} setState={setState} dbReady={dbReady} onLogout={onLogout} />;
+  if (phase === "login") return <LoginScreen onSuccess={onLoginSuccess} />;
+  if (phase === "change" && user) return <ChangePasswordScreen user={user} onDone={onChangeDone} />;
+  if (phase === "ready" && state && user) return <Workspace state={state} setState={setState} dbReady={dbReady} user={user} meta={meta} onLogout={onLogout} />;
+  return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, color: T.sub, fontFamily: T.sans, fontSize: 14 }}>Bezig met laden…</div>;
 }

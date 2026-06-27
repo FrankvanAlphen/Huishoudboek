@@ -1,49 +1,72 @@
 # Huishoudboekje
 
-Een gedeeld huishoudboekje voor twee mensen, met één gezamenlijk wachtwoord.
-Je begroting staat al klaar in jouw eigen postenstructuur; je werkt het bij door
-je ING-CSV te uploaden. De app leidt je transactie-voor-transactie door alles wat
-je aandacht nodig heeft (een post kiezen of een opmerking toevoegen) en leert daar
-regels van, zodat het elke keer minder werk wordt.
+Een gedeeld huishoudboekje voor twee mensen, met **twee persoonlijke inloggen** en
+een **logboek dat bijhoudt wie wat doet**. Je begroting staat klaar in jouw eigen
+postenstructuur; je werkt het bij door je ING-CSV te uploaden. De app leidt je
+transactie-voor-transactie door alles wat je aandacht nodig heeft (een post kiezen
+of een opmerking toevoegen) en leert daar regels van, zodat het elke keer minder
+werk wordt.
 
-Techniek: één React-frontend (Vite) + een kleine Express-server die de hele
-toestand als JSON bewaart in PostgreSQL. Bedragen overal in hele centen.
+Techniek: één React-frontend (Vite) + een kleine Express-server die de toestand,
+de gebruikers en het logboek opslaat in PostgreSQL. Bedragen overal in hele centen.
+
+---
+
+## Inloggen
+
+Er zijn twee gebruikers. Op het inlogscherm kies je wie je bent en typ je je
+wachtwoord.
+
+| Gebruiker            | Tijdelijk startwachtwoord |
+| -------------------- | ------------------------- |
+| Frank van Alphen     | `@chterZoom24!`           |
+| Kimberley Lagendijk  | `V00rZoom24!`             |
+
+**Bij de eerste keer inloggen** moet ieder een eigen, nieuw wachtwoord kiezen
+(minstens 8 tekens). Daarna log je met dat nieuwe wachtwoord in. Wijzigen kan later
+altijd nog via de knop **Wachtwoord wijzigen** linksonder in de app.
+
+In het tabblad **Activiteit** zie je wie wanneer heeft ingelogd, geïmporteerd, de
+begroting of regels heeft aangepast, of een wachtwoord heeft gewijzigd.
 
 ---
 
 ## Op Railway zetten (kort en simpel)
 
-1. Maak een nieuw project op Railway en kies **Deploy from GitHub repo** (of sleep
-   deze map als zip naar een nieuwe service). Railway herkent een Node-app, draait
-   automatisch `npm install` + `npm run build` en start daarna met `npm start`.
+1. Nieuw project op Railway → **Deploy from GitHub repo** (of sleep deze map als zip
+   naar een nieuwe service). Railway herkent een Node-app, draait automatisch
+   `npm install` + `npm run build` en start met `npm start`.
 
-2. Heb je nog geen database? Klik in je project op **New → Database → PostgreSQL**.
+2. Heb je nog geen database? Klik op **New → Database → PostgreSQL**.
 
 3. Open je **app-service** (niet de database) → tabblad **Variables** en zet er
-   **twee** dingen op:
+   **één** ding op:
 
-   | Naam           | Waarde                                  |
-   | -------------- | --------------------------------------- |
-   | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}`            |
-   | `APP_PASSWORD` | het wachtwoord dat jullie samen gebruiken |
+   | Naam           | Waarde                       |
+   | -------------- | ---------------------------- |
+   | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
 
    > Heet je Postgres-service anders (bijv. `Postgres-jIBC`), gebruik dan die naam:
-   > `${{Postgres-jIBC.DATABASE_URL}}`. Of plak gewoon de interne Database-URL die
-   > je bij de Postgres-service onder **Variables** ziet staan.
+   > `${{Postgres-jIBC.DATABASE_URL}}`. Of plak de interne Database-URL die je bij de
+   > Postgres-service onder **Variables** ziet staan.
 
-4. Onder **Settings → Networking** klik je op **Generate Domain** om een webadres te
-   krijgen. Open dat adres, log in met `APP_PASSWORD`, en je bent binnen.
+4. Onder **Settings → Networking** klik je op **Generate Domain**. Open dat adres,
+   kies wie je bent, log in met je startwachtwoord en kies een nieuw wachtwoord.
 
-Dat is alles. De app maakt zelf de benodigde tabel aan bij de eerste start.
+De app maakt zelf de benodigde tabellen (gebruikers, logboek, data) aan bij de
+eerste start.
 
-### Belangrijk om te weten
+### Goed om te weten
 
-- **De app start altijd**, ook als je `DATABASE_URL` (nog) niet hebt gezet. Hij
-  draait dan met tijdelijk geheugen en de data verdwijnt bij een herstart. Linksonder
-  in de app zie je of je met de database verbonden bent. Zet `DATABASE_URL` zodra je
+- **`APP_PASSWORD` is niet meer nodig.** Inloggen gaat nu via de twee persoonlijke
+  gebruikers hierboven. Een oude `APP_PASSWORD`-variabele mag blijven staan; hij
+  wordt genegeerd.
+- **De app start altijd**, ook zonder `DATABASE_URL`. Dan draait hij met tijdelijk
+  geheugen en verdwijnt alles bij een herstart (ook de wachtwoordwijzigingen).
+  Linksonder zie je of je met de database verbonden bent. Zet `DATABASE_URL` zodra je
   blijvende, gedeelde opslag wilt.
-- **SSL:** de interne Railway-database heeft dat niet nodig — niets instellen.
-  Gebruik je een externe database die SSL eist, zet dan `DATABASE_SSL=true`.
+- **SSL:** de interne Railway-database heeft dat niet nodig — niets instellen. Een
+  externe database die SSL eist: zet `DATABASE_SSL=true`.
 
 ---
 
@@ -51,9 +74,6 @@ Dat is alles. De app maakt zelf de benodigde tabel aan bij de eerste start.
 
 ```bash
 npm install
-npm run dev        # frontend op http://localhost:5173 (zonder server-opslag)
-
-# of de echte server (frontend + opslag samen):
 npm run build
 npm start          # http://localhost:3000
 ```

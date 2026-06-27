@@ -12,7 +12,12 @@ async function call(method, url, body) {
 }
 
 export const me = () => call("GET", "/api/me");
-export const login = (password) => call("POST", "/api/login", { password });
+export const getUsers = () => call("GET", "/api/users");
+export const login = (username, password) => call("POST", "/api/login", { username, password });
+export const changePassword = (newPassword) => call("POST", "/api/change-password", { newPassword });
 export const logout = () => call("POST", "/api/logout");
 export const getState = () => call("GET", "/api/state");
 export const putState = (state) => call("PUT", "/api/state", { state });
+export const getActivity = () => call("GET", "/api/activity");
+// logboek-actie; faalt stil zodat het de app nooit ophoudt
+export const logAction = (action) => call("POST", "/api/log", { action }).catch(() => {});
