@@ -7,16 +7,33 @@ import pg from "pg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json({ limit: "8mb" }));
+app.disable("x-powered-by");
+app.use(express.json({ limit: "4mb" }));
+
+/* ---- Beveiligingsheaders ---- */
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  if (process.env.COOKIE_INSECURE !== "true") res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  next();
+});
 
 /* ---- Configuratie ---- */
-const SECRET = process.env.APP_SECRET || "huishoudboekje-vaste-sleutel-v2";
+// BELANGRIJK: zet APP_SECRET in Railway op een lange willekeurige waarde.
+// Zonder APP_SECRET maken we een tijdelijke willekeurige sleutel (veilig, maar cookies verlopen bij herstart).
+const SECRET = process.env.APP_SECRET || crypto.randomBytes(32).toString("hex");
+if (!process.env.APP_SECRET) console.warn("WAARSCHUWING: APP_SECRET is niet gezet. Er is nu een tijdelijke sleutel gemaakt; je moet na elke herstart opnieuw inloggen. Zet APP_SECRET in Railway (Variables) op een lange willekeurige tekst.");
+// Cookie standaard alleen via HTTPS (Secure). Voor lokaal testen op http: COOKIE_INSECURE=true.
+const COOKIE_SECURE = process.env.COOKIE_INSECURE !== "true";
 
 /* ---- De twee gebruikers met hun TIJDELIJKE startwachtwoord ----
-   Bij de eerste keer inloggen moet ieder een eigen nieuw wachtwoord kiezen. */
+   Bij de eerste keer inloggen moet ieder een eigen nieuw wachtwoord kiezen.
+   Tip: zet FRANK_TEMP_PW / KIMBERLEY_TEMP_PW in Railway om de startwachtwoorden niet in de broncode te hebben. */
 const SEED_USERS = [
-  { username: "frank", displayName: "Frank van Alphen", tempPassword: "@chterZoom24!" },
-  { username: "kimberley", displayName: "Kimberley Lagendijk", tempPassword: "V00rZoom24!" },
+  { username: "frank", displayName: "Frank van Alphen", tempPassword: process.env.FRANK_TEMP_PW || "@chterZoom24!" },
+  { username: "kimberley", displayName: "Kimberley Lagendijk", tempPassword: process.env.KIMBERLEY_TEMP_PW || "V00rZoom24!" },
 ];
 
 /* ---- Wachtwoord-hashing (scrypt, ingebouwd in Node) ---- */
@@ -34,16 +51,36 @@ function verifyPassword(pw, stored) {
   } catch { return false; }
 }
 
-/* ---- Cookie-handtekening (weet WIE er is ingelogd) ---- */
-const sign = (username) => crypto.createHmac("sha256", SECRET).update(username).digest("hex");
-const cookieFor = (username) =>
-  `hh_auth=${username}.${sign(username)}; HttpOnly; Path=/; Max-Age=${60 * 60 * 24 * 180}; SameSite=Lax`;
-function currentUser(req) {
-  const raw = parseCookies(req).hh_auth || "";
-  const i = raw.indexOf(".");
-  if (i < 0) return null;
-  const username = raw.slice(0, i), sig = raw.slice(i + 1);
-  return sig === sign(username) ? username : null;
+/* ---- Sessie-cookie ----
+   De cookie bevat: gebruikersnaam.vervaldatum.handtekening.
+   De handtekening is óók gebaseerd op (een afgeleide van) het wachtwoord, zodat
+   wachtwoord wijzigen automatisch álle oude cookies ongeldig maakt. */
+const MAX_AGE = 60 * 60 * 24 * 180; // 180 dagen
+const pwTag = (passwordHash) => crypto.createHash("sha256").update(String(passwordHash)).digest("hex").slice(0, 16);
+function tokenFor(user) {
+  const exp = Date.now() + MAX_AGE * 1000;
+  const payload = `${user.username}.${exp}`;
+  const sig = crypto.createHmac("sha256", SECRET).update(`${payload}.${pwTag(user.passwordHash)}`).digest("hex");
+  return `${payload}.${sig}`;
+}
+const cookieFor = (user) =>
+  `hh_auth=${tokenFor(user)}; HttpOnly; Path=/; Max-Age=${MAX_AGE}; SameSite=Strict${COOKIE_SECURE ? "; Secure" : ""}`;
+const clearCookie = () => `hh_auth=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict${COOKIE_SECURE ? "; Secure" : ""}`;
+async function currentUser(req) {
+  try {
+    const raw = parseCookies(req).hh_auth || "";
+    const parts = raw.split(".");
+    if (parts.length !== 3) return null;
+    const [username, expStr, sig] = parts;
+    const exp = Number(expStr);
+    if (!exp || exp < Date.now()) return null; // verlopen
+    const u = await findUser(username);
+    if (!u) return null;
+    const expected = crypto.createHmac("sha256", SECRET).update(`${username}.${expStr}.${pwTag(u.passwordHash)}`).digest("hex");
+    const a = Buffer.from(sig), b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    return u; // geldig: geef de hele gebruiker terug
+  } catch { return null; } // bij twijfel: afwijzen (fail closed)
 }
 function parseCookies(req) {
   const header = req.headers.cookie || "";
@@ -160,53 +197,80 @@ async function getActivity(limit) {
 }
 
 /* ---- Middleware ---- */
-function requireAuth(req, res, next) {
-  const username = currentUser(req);
-  if (!username) return res.status(401).json({ error: "unauthorized" });
-  req.username = username;
+// vangt fouten uit async-handlers netjes op (anders blijft een verzoek hangen)
+const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// ingelogd? zo niet: 401. Bij twijfel afwijzen.
+const requireLogin = ah(async (req, res, next) => {
+  const u = await currentUser(req);
+  if (!u) return res.status(401).json({ error: "unauthorized" });
+  req.user = u; req.username = u.username;
   next();
+});
+// ingelogd én startwachtwoord al gewijzigd. Blokkeert data-toegang tot het wachtwoord is gewijzigd.
+const requireAuth = ah(async (req, res, next) => {
+  const u = await currentUser(req);
+  if (!u) return res.status(401).json({ error: "unauthorized" });
+  if (u.mustChange) return res.status(403).json({ error: "must-change" });
+  req.user = u; req.username = u.username;
+  next();
+});
+
+/* ---- Rem op inlogpogingen: per IP én per gebruikersnaam (tegen wachtwoord-raden) ---- */
+const ipHits = new Map(), userHits = new Map();
+function tooMany(map, key, max, windowMs) {
+  const now = Date.now();
+  const e = map.get(key);
+  if (!e || now - e.ts > windowMs) { map.set(key, { count: 1, ts: now }); return false; }
+  e.count++; return e.count > max;
 }
+const clientIp = (req) => String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() || req.socket.remoteAddress || "?";
 
 /* ---- API ---- */
 app.get("/api/health", (req, res) => res.json({ ok: true, db: dbReady }));
 
-app.get("/api/users", async (req, res) => res.json({ users: await listUsers() }));
+app.get("/api/users", ah(async (req, res) => res.json({ users: await listUsers() })));
 
-app.get("/api/me", async (req, res) => {
-  const username = currentUser(req);
-  if (!username) return res.json({ authed: false, db: dbReady });
-  const u = await findUser(username);
+app.get("/api/me", ah(async (req, res) => {
+  const u = await currentUser(req);
   if (!u) return res.json({ authed: false, db: dbReady });
   res.json({ authed: true, user: { username: u.username, displayName: u.displayName }, mustChange: u.mustChange, db: dbReady });
-});
+}));
 
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", ah(async (req, res) => {
+  const ip = clientIp(req);
   const { username, password } = req.body || {};
-  const u = await findUser(username || "");
-  if (!u || !verifyPassword(password || "", u.passwordHash)) return res.status(401).json({ error: "wrong-credentials" });
-  res.setHeader("Set-Cookie", cookieFor(u.username));
+  const uname = String(username || "");
+  if (tooMany(ipHits, ip, 15, 5 * 60 * 1000) || tooMany(userHits, uname.toLowerCase(), 10, 10 * 60 * 1000))
+    return res.status(429).json({ error: "te-veel-pogingen" });
+  const u = await findUser(uname);
+  if (!u) { crypto.scryptSync(String(password || ""), Buffer.from("00000000000000000000000000000000", "hex"), 64); return res.status(401).json({ error: "wrong-credentials" }); } // dummy werk: gelijke tijd of de naam nu bestaat of niet
+  if (!verifyPassword(password || "", u.passwordHash)) return res.status(401).json({ error: "wrong-credentials" });
+  ipHits.delete(ip); userHits.delete(uname.toLowerCase());
+  res.setHeader("Set-Cookie", cookieFor(u));
   await addLog(u.username, u.displayName, "ingelogd");
   res.json({ ok: true, user: { username: u.username, displayName: u.displayName }, mustChange: u.mustChange, db: dbReady });
-});
+}));
 
-app.post("/api/change-password", requireAuth, async (req, res) => {
+app.post("/api/change-password", requireLogin, ah(async (req, res) => {
   const newPassword = (req.body && req.body.newPassword) || "";
   if (String(newPassword).length < 8) return res.status(400).json({ error: "te-kort" });
-  const u = await findUser(req.username);
-  if (!u) return res.status(401).json({ error: "unauthorized" });
-  await setUserPassword(u.username, hashPassword(newPassword));
-  await addLog(u.username, u.displayName, "wachtwoord gewijzigd");
+  const newHash = hashPassword(newPassword);
+  await setUserPassword(req.username, newHash);
+  await addLog(req.username, req.user.displayName, "wachtwoord gewijzigd");
+  // geef een verse cookie mee (de oude is nu ongeldig omdat hij aan het oude wachtwoord hing)
+  res.setHeader("Set-Cookie", cookieFor({ username: req.username, passwordHash: newHash }));
   res.json({ ok: true });
-});
+}));
 
-app.post("/api/logout", async (req, res) => {
-  const username = currentUser(req);
-  if (username) { const u = await findUser(username); if (u) await addLog(u.username, u.displayName, "uitgelogd"); }
-  res.setHeader("Set-Cookie", "hh_auth=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax");
+app.post("/api/logout", ah(async (req, res) => {
+  const u = await currentUser(req);
+  if (u) await addLog(u.username, u.displayName, "uitgelogd");
+  res.setHeader("Set-Cookie", clearCookie());
   res.json({ ok: true });
-});
+}));
 
-app.get("/api/state", requireAuth, async (req, res) => {
+app.get("/api/state", requireAuth, ah(async (req, res) => {
   try {
     const r = await readState();
     res.json({ state: r.state == null ? null : r.state, updatedBy: r.updatedBy || null, updatedAt: r.updatedAt || null, db: dbReady });
@@ -214,13 +278,12 @@ app.get("/api/state", requireAuth, async (req, res) => {
     console.error("State lezen mislukt:", e.message);
     res.json({ state: memState ? memState.data : null, db: dbReady });
   }
-});
+}));
 
-app.put("/api/state", requireAuth, async (req, res) => {
+app.put("/api/state", requireAuth, ah(async (req, res) => {
   const data = req.body && req.body.state;
   if (data == null) return res.status(400).json({ error: "geen toestand meegegeven" });
-  const u = await findUser(req.username);
-  const by = (u && u.displayName) || req.username;
+  const by = (req.user && req.user.displayName) || req.username;
   try {
     await writeState(data, by);
     res.json({ ok: true, db: dbReady, updatedBy: by });
@@ -229,15 +292,15 @@ app.put("/api/state", requireAuth, async (req, res) => {
     memState = { data, updatedBy: by, updatedAt: new Date().toISOString() };
     res.json({ ok: true, db: false, updatedBy: by });
   }
-});
+}));
 
-app.post("/api/log", requireAuth, async (req, res) => {
+app.post("/api/log", requireAuth, ah(async (req, res) => {
   const action = String((req.body && req.body.action) || "").slice(0, 300);
-  if (action) { const u = await findUser(req.username); if (u) await addLog(u.username, u.displayName, action); }
+  if (action) await addLog(req.username, req.user.displayName, action);
   res.json({ ok: true });
-});
+}));
 
-app.get("/api/activity", requireAuth, async (req, res) => res.json({ activity: await getActivity(150) }));
+app.get("/api/activity", requireAuth, ah(async (req, res) => res.json({ activity: await getActivity(150) })));
 
 /* ---- Statische frontend + SPA-fallback ---- */
 const dist = path.join(__dirname, "dist");
@@ -254,6 +317,13 @@ if (hasBuild) {
     res.status(200).send("<h1>Huishoudboekje</h1><p>De frontend-build (map <code>dist</code>) ontbreekt. Controleer dat <code>npm run build</code> tijdens de deploy is uitgevoerd.</p>");
   });
 }
+
+/* ---- Foutafhandeling (als laatste) ---- */
+app.use((err, req, res, next) => {
+  console.error("Onverwachte fout:", err && err.message);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: "server-fout" });
+});
 
 /* ---- Start ---- */
 const PORT = process.env.PORT || 3000;

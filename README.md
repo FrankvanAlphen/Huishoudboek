@@ -70,6 +70,30 @@ eerste start.
 
 ---
 
+## Beveiliging — doe dit meteen na de eerste deploy
+
+De app staat op het open internet; je inlog is de enige drempel. Drie dingen zijn **verplicht**:
+
+1. **Zet `APP_SECRET`** (Railway → je service → Variables) op een lange willekeurige tekst.
+   Genereer er een met `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+   Zonder deze sleutel moet je na elke herstart opnieuw inloggen.
+2. **Log één keer in als beide gebruikers en kies meteen een eigen wachtwoord.** De
+   startwachtwoorden staan in de broncode; ze zijn pas veilig zodra je ze hebt gewijzigd.
+   Een wachtwoord wijzigen logt automatisch álle oude sessies (ook op andere apparaten) uit.
+3. **Koppel een PostgreSQL-database** (`DATABASE_URL`), anders verdwijnen je gegevens bij
+   een herstart en staan ook de gebruikers/wachtwoorden niet vast.
+
+Wat er al ingebouwd zit: wachtwoorden worden gehasht (scrypt + salt), het inlog-cookie is
+`HttpOnly`, `Secure` (alleen via HTTPS) en `SameSite=Strict`, heeft een vervaldatum en is
+gekoppeld aan je wachtwoord (wijzigen = oude cookies ongeldig), er zit een rem op
+inlogpogingen (per IP én per gebruikersnaam), beveiligingsheaders (HSTS, anti-clickjacking,
+nosniff), en alle database-opvragingen zijn geparametriseerd (geen SQL-injectie).
+
+Optioneel sterker: zet `FRANK_TEMP_PW` / `KIMBERLEY_TEMP_PW` zodat de startwachtwoorden niet
+in de broncode staan, en deel de URL niet publiek.
+
+---
+
 ## Lokaal draaien (optioneel)
 
 ```bash
