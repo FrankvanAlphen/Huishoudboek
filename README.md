@@ -87,3 +87,11 @@ Zonder `DATABASE_URL` werkt alles, maar wordt er niets blijvend opgeslagen.
 - **Eigen posten**: voeg posten toe met **+ nieuwe post** in Begroting, Uitgaven of Posten. In **Posten** kun je hernoemen, het type wijzigen en (lege) posten verwijderen.
 - **Regels zelf maken/aanpassen**: in **Regels** maak je met **+ Nieuwe regel** eigen herkenningsregels en pas je bestaande inline aan.
 - **Automatische migratie**: bestaande opgeslagen data (met één jaar) wordt bij het laden automatisch omgezet naar de nieuwe jaren-structuur. Je hoeft niets handmatig te doen.
+
+## Nieuw: Transacties-register, Vermogen per rekening en betrouwbaar indelen
+
+- **Transacties** (nieuw tabblad): je wekelijkse/maandelijkse naloop. Alle transacties van het gekozen jaar; per transactie kies je de post (bij een uitgave zie je géén inkomstenposten), zet je een **notitie**, **markeer** je 'm (★, bijv. voorgeschoten/nog uitzoeken), of **verdeel** je 'm over meerdere posten. Filter op *te sorteren* of *gemarkeerd*. Je kunt vanaf een transactie ook meteen een herkenningsregel maken ("Onthoud dit").
+- **Openstaande acties**: staan boven op het Overzicht (te sorteren + gemarkeerd) met een knop naar Transacties.
+- **Vermogen** (nieuw tabblad): per spaar-/reserveringsrekening het startsaldo, wat er bij/af ging, en het huidige saldo — plus het totaal.
+- **Import zonder popup**: herkende transacties worden meteen ingedeeld; de rest komt als 'te sorteren' in het register. Geld­invoervelden (begroting, maanden, splitsen) typen nu soepel.
+- **Dubbele detectie**: elke transactie krijgt een vingerafdruk uit datum + bedrag + tegenrekening + de volledige mededelingen + mutatiesoort. Upload je per ongeluk dezelfde CSV, dan wordt alles herkend als al-aanwezig en niets dubbel toegevoegd.
