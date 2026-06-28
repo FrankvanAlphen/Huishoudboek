@@ -86,6 +86,19 @@ function computeBudgetDeviation(actualNet, budgetNet) {
   for (let i = 0; i < 12; i++) { ca += actualNet[i]; cb += budgetNet[i]; out.push(ca - cb); }
   return out;
 }
+// Actueel banksaldo uit de "Saldo na mutatie"-kolom: het saldo na de meest recente transactie.
+// Robuust bij meerdere transacties op de laatste dag: het eindsaldo is het saldo dat niet
+// het "saldo-ervoor" van een andere transactie van diezelfde dag is.
+function bankBalanceFromTxns(txns) {
+  const withSaldo = (txns || []).filter((t) => t && t.saldoNaMutatieCents != null);
+  if (!withSaldo.length) return null;
+  const maxDate = withSaldo.reduce((m, t) => (t.date > m ? t.date : m), "");
+  const day = withSaldo.filter((t) => t.date === maxDate);
+  if (day.length === 1) return day[0].saldoNaMutatieCents;
+  const befores = new Set(day.map((t) => t.saldoNaMutatieCents - t.amountCents));
+  const finals = day.filter((t) => !befores.has(t.saldoNaMutatieCents));
+  return (finals[0] || day[day.length - 1]).saldoNaMutatieCents;
+}
 
 /* --------------------------------------------------------------- Dedup */
 function fnv1a(input) {
@@ -120,32 +133,26 @@ function matchCondition(tx, c) {
   return test(field);
 }
 const ruleMatches = (tx, r) => r.conditions.length > 0 && r.conditions.every((c) => matchCondition(tx, c));
-function categorize(tx, rules) {
+function matchSpaarcode(tx, categories) {
+  if (!categories) return null;
+  const hay = `${tx.name || ""} ${tx.omschrijving || ""} ${tx.description || ""}`.toLowerCase();
+  for (const c of categories) {
+    const code = String(c.spaarcode || "").trim().toLowerCase();
+    if (code && hay.includes(code)) return { categoryId: c.id, ruleId: "spaarcode" };
+  }
+  return null;
+}
+function categorize(tx, rules, categories) {
+  const sc = matchSpaarcode(tx, categories); // accountnummer is het betrouwbaarst — gaat vóór gewone regels
+  if (sc) return sc;
   let best = null;
   for (const r of rules) { if (r.active && ruleMatches(tx, r) && (!best || r.priority < best.priority)) best = r; }
   return best ? { categoryId: best.categoryId, ruleId: best.id } : null;
 }
+// Mag deze post bij dit bedrag? Inkomsten alleen bij positieve mutaties; verder alles (incl. sparen).
+const catAllowed = (c, sign) => !!c && (sign >= 0 || c.type !== "income");
 
 /* --------------------------------------------------- Begrotingsmatrix-parser */
-function parseBudgetMatrix(text) {
-  const rows = [], errors = [];
-  const delim = text.includes("\t") ? "\t" : text.includes(";") ? ";" : ",";
-  text.split(/\r?\n/).forEach((raw, i) => {
-    if (raw.trim() === "") return;
-    const cells = raw.split(delim).map((c) => c.trim());
-    const name = cells[0] || "", amts = cells.slice(1).filter((c) => c !== "");
-    if (!name) { errors.push(`Regel ${i + 1}: geen postnaam.`); return; }
-    let months;
-    try {
-      if (amts.length === 12) months = amts.map(parseDecimalToCents);
-      else if (amts.length === 1) { const a = parseDecimalToCents(amts[0]); months = Array.from({ length: 12 }, () => a); }
-      else { errors.push(`Regel ${i + 1} ("${name}"): 1 gemiddelde of 12 maanden nodig.`); return; }
-    } catch { errors.push(`Regel ${i + 1} ("${name}"): bedrag onleesbaar.`); return; }
-    rows.push({ name, months });
-  });
-  return { rows, errors };
-}
-
 /* ---------------------------------------------------------- ING CSV-parser */
 function splitCsvLine(line, delim) {
   const out = []; let cur = ""; let q = false;
@@ -170,7 +177,8 @@ function parseINGRows(rows) {
   const idx = (f) => header.findIndex((h) => h.includes(f));
   const iDate = idx("datum"), iName = idx("naam"), iTegen = idx("tegenrekening"),
     iAfBij = header.findIndex((h) => h.includes("af bij") || h.includes("af/bij")),
-    iBedrag = idx("bedrag"), iMut = idx("mutatiesoort"), iMed = idx("mededeling");
+    iBedrag = idx("bedrag"), iMut = idx("mutatiesoort"), iMed = idx("mededeling"),
+    iSaldo = header.findIndex((h) => h.includes("saldo na"));
   if (iDate < 0 || iBedrag < 0)
     return { txns: [], errors: ["Kolommen 'Datum' en/of 'Bedrag' niet gevonden. Het Import-tabblad is voor je ING-bankbestand (CSV of Excel). Een begroting hoort op het Begroting-tabblad."] };
   const txns = [], errors = [];
@@ -180,6 +188,8 @@ function parseINGRows(rows) {
       const amountCents = iAfBij >= 0
         ? (String(c[iAfBij] || "").toLowerCase().startsWith("a") ? -1 : 1) * Math.abs(raw)
         : raw;
+      let saldoNaMutatieCents = null;
+      if (iSaldo >= 0 && c[iSaldo] != null && String(c[iSaldo]).trim() !== "") { try { saldoNaMutatieCents = parseDecimalToCents(c[iSaldo]); } catch { saldoNaMutatieCents = null; } }
       txns.push({
         date: parseINGDate(c[iDate]),
         amountCents,
@@ -188,6 +198,7 @@ function parseINGRows(rows) {
         description: iMed >= 0 ? String(c[iMed] != null ? c[iMed] : "") : "",
         omschrijving: extractOmschrijving(iMed >= 0 ? c[iMed] : "") || String(c[iName] != null ? c[iName] : ""),
         mutationType: String(c[iMut] != null ? c[iMut] : ""),
+        saldoNaMutatieCents,
       });
     } catch (e) { errors.push(`Regel ${n + 2}: ${e.message}`); }
   });
@@ -371,6 +382,17 @@ function buildSeed() {
   const groups = GROUPS_DEF.map((naam, i) => ({ id: slug(naam), naam, volgorde: i }));
   const categories = CAT_DEFS.map(([g, naam, type, note], i) => ({ id: slug(naam), groupId: slug(g), naam, type, noteSuggested: note, volgorde: i }));
   const cid = (naam) => slug(naam);
+  // Oranje (ING) spaarrekeningcodes — die staan in de mededelingen bij een over-/bijschrijving.
+  const SPAARCODES = {
+    "Gezamenlijke spaarrekening / ING": "H17729888",
+    "Tussenrekening: cadeaubonnen, cash geld": "B55030134",
+    "Spaarrekening Maud / ING": "A96691295",
+    "Eigen risico / ING": "H96319154",
+    "Nieuwe Auto --> aflossen auto / ABN": "M96388351",
+    "Vakantie / ING": "V54438290",
+    "Woonbelasting / ING": "X34919021",
+  };
+  for (const c of categories) if (SPAARCODES[c.naam]) c.spaarcode = SPAARCODES[c.naam];
 
   // Maandgemiddelden (euro's) — uit je begroting. De Gezamenlijke spaarrekening is
   // de sluitpost die de begroting precies op €77.940 laat kloppen.
@@ -557,7 +579,7 @@ const inputStyle = { width: "100%", boxSizing: "border-box", padding: "8px 10px"
 /** Betrouwbare, gegroepeerde keuzelijst voor posten. sign<0 = uitgave/sparen, sign>0 = inkomsten. */
 function CatSelect({ categories, groups, value, onChange, sign = 0, placeholder = "— kies post —", style }) {
   // uitgave (sign<0): geen inkomstenposten. inkomst (sign>0): álles mag — ook een uitgavepost (teruggave/voorgeschoten) of een spaarpost (opname).
-  const allow = (c) => { if (c.id === SLUITPOST_ID) return false; if (sign < 0) return c.type !== "income"; return true; };
+  const allow = (c) => catAllowed(c, sign);
   return (
     <select value={value || ""} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, ...style }}>
       <option value="">{placeholder}</option>
@@ -595,7 +617,7 @@ function PostPicker({ categories, groups, sign = 0, value, onChange, suggestions
   const [hi, setHi] = useState(0);
   const [focused, setFocused] = useState(false);
   const groupName = (id) => (groups.find((g) => g.id === id) || {}).naam || "";
-  const allow = (c) => c.id !== SLUITPOST_ID && (sign >= 0 || c.type !== "income");
+  const allow = (c) => catAllowed(c, sign);
   const byId = (id) => categories.find((c) => c.id === id);
   const pool = categories.filter(allow);
   const ql = q.trim().toLowerCase();
@@ -666,36 +688,15 @@ function guessKeyword(text) {
   toks.sort((a, b) => b.length - a.length); // langste woord = vaak de merknaam
   return toks[0];
 }
-/** Voorstel voor een post: eerst een regel, anders leren van eerder ingedeelde transacties. */
-function suggestCategory(tx, rules, categories, history) {
-  const r = categorize(tx, rules);
-  if (r) return { categoryId: r.categoryId, source: "regel" };
-  const sign = tx.amountCents < 0 ? -1 : 1;
-  const allowed = (cid) => { const c = categories.find((x) => x.id === cid); return c && c.id !== SLUITPOST_ID && (sign >= 0 || c.type !== "income"); };
-  const myToks = new Set(tokenize((tx.name || "") + " " + (tx.omschrijving || "")));
-  if (!myToks.size) return null;
-  const votes = {};
-  for (const h of history || []) {
-    if (h.id === tx.id || !h.allocations || h.allocations.length !== 1) continue;
-    const cid = h.allocations[0].categoryId;
-    if (!allowed(cid)) continue;
-    let overlap = 0;
-    for (const t of tokenize((h.name || "") + " " + (h.omschrijving || ""))) if (myToks.has(t)) overlap++;
-    if (overlap > 0) votes[cid] = (votes[cid] || 0) + overlap;
-  }
-  let bestCid = null, bestV = 0;
-  for (const [cid, v] of Object.entries(votes)) if (v > bestV) { bestV = v; bestCid = cid; }
-  return bestCid ? { categoryId: bestCid, source: "geschiedenis" } : null;
-}
 /** Dynamische snelkeuze: eerst de voorspelling (regel + lijkt-op eerdere transacties),
  *  daarna aangevuld met je meest-gebruikte posten. */
 function rankSuggestions(tx, rules, categories, history, max = 4) {
   const sign = tx.amountCents < 0 ? -1 : 1;
-  const allow = (cid) => { const c = categories.find((x) => x.id === cid); return c && c.id !== SLUITPOST_ID && (sign >= 0 || c.type !== "income"); };
+  const allow = (cid) => catAllowed(categories.find((x) => x.id === cid), sign);
   const pred = {};
   const addP = (cid, s) => { if (allow(cid)) pred[cid] = (pred[cid] || 0) + s; };
-  const r = categorize(tx, rules);
-  if (r) addP(r.categoryId, 1000); // harde voorspelling uit een regel
+  const r = categorize(tx, rules, categories);
+  if (r) addP(r.categoryId, 1000); // harde voorspelling uit een regel of spaarcode
   const myToks = new Set(tokenize((tx.name || "") + " " + (tx.omschrijving || "")));
   const freq = {};
   for (const h of history || []) {
@@ -718,7 +719,7 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 /* PAGINA'S                                                              */
 /* ===================================================================== */
 
-function Overzicht({ vitals, signals, breakEven, monthRows, currentMonth, jaar, openActions, forecast, openingBalanceCents, onSetOpeningBalance, onGoto, onReview }) {
+function Overzicht({ vitals, signals, breakEven, monthRows, currentMonth, jaar, openActions, forecast, openingBalanceCents, bankBalanceCents, onSetOpeningBalance, onGoto, onReview }) {
   const tile = (label, node, sub, onClick) => (
     <Card onClick={onClick} style={{ padding: 18, flex: 1, minWidth: 190, cursor: onClick ? "pointer" : "default" }}>
       <div style={{ fontSize: 12, color: T.sub, marginBottom: 6 }}>{label}</div>
@@ -730,6 +731,10 @@ function Overzicht({ vitals, signals, breakEven, monthRows, currentMonth, jaar, 
   const oa = openActions || { teSorteren: 0, gemarkeerd: 0, count: 0, items: [] };
   const fc = forecast || { accountBalance: 0, remainingOut: 0, remainingInc: 0, projectedEnd: 0, openingSet: false, month: currentMonth };
   const haalt = fc.projectedEnd >= 0;
+  const haveBank = bankBalanceCents != null;          // banksaldo bekend uit de geïmporteerde "Saldo na mutatie"-kolom
+  const diff = haveBank ? fc.accountBalance - bankBalanceCents : 0; // app minus bank
+  const matches = haveBank && diff === 0;
+  const fixOpening = () => onSetOpeningBalance((openingBalanceCents || 0) - diff); // trek startsaldo gelijk aan de bank
   return (
     <div>
       <SectionTitle>Overzicht · t/m {mn[currentMonth - 1]} {jaar}</SectionTitle>
@@ -737,11 +742,24 @@ function Overzicht({ vitals, signals, breakEven, monthRows, currentMonth, jaar, 
       {!fc.openingSet && (
         <Card style={{ padding: 16, marginBottom: 16, border: `1px solid #f0dcb8`, background: T.warnSoft }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "#9a6a14", marginBottom: 4 }}>Stel eerst je startsaldo in</div>
-          <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Vul het saldo van je ING-rekening in zoals het was vóór je eerste transactie. Daar tellen alle mutaties bij op, zodat je huidige saldo hieronder gelijk hoort te zijn aan je ING-app.</div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 13, color: T.sub }}>Startsaldo</span>
-            <MoneyInput cents={openingBalanceCents || 0} width={150} onChange={(v) => onSetOpeningBalance(v)} />
-          </div>
+          {haveBank ? (
+            <>
+              <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Goed nieuws: in je geïmporteerde bestand staat je werkelijke banksaldo (<b>{formatEUR(bankBalanceCents)}</b> na je laatste transactie). Daarmee zet ik je startsaldo in één klik goed, zodat je huidige saldo exact met je bank klopt.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <Btn onClick={fixOpening}>Gebruik mijn banksaldo ({formatEUR(bankBalanceCents)})</Btn>
+                <span style={{ fontSize: 12, color: T.sub }}>of handmatig:</span>
+                <MoneyInput cents={openingBalanceCents || 0} width={140} onChange={(v) => onSetOpeningBalance(v)} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Vul het saldo van je ING-rekening in zoals het was vóór je eerste transactie. Daar tellen alle mutaties bij op, zodat je huidige saldo hieronder gelijk hoort te zijn aan je ING-app. Tip: importeer je ING-bestand — daar staat je saldo in en kan ik dit automatisch doen.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 13, color: T.sub }}>Startsaldo</span>
+                <MoneyInput cents={openingBalanceCents || 0} width={150} onChange={(v) => onSetOpeningBalance(v)} />
+              </div>
+            </>
+          )}
         </Card>
       )}
 
@@ -752,6 +770,17 @@ function Overzicht({ vitals, signals, breakEven, monthRows, currentMonth, jaar, 
           <div style={{ fontSize: 12, color: T.sub, marginTop: 6, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <span>startsaldo + alle mutaties · vergelijk met je ING-app</span>
           </div>
+          {haveBank && (
+            matches ? (
+              <div style={{ marginTop: 10, fontSize: 13, fontWeight: 700, color: T.pos, display: "flex", alignItems: "center", gap: 6 }}>✓ Klopt met je bank ({formatEUR(bankBalanceCents)})</div>
+            ) : (
+              <div style={{ marginTop: 10, background: T.warnSoft, border: "1px solid #f0dcb8", borderRadius: 8, padding: "9px 11px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#9a6a14" }}>⚠ {formatEUR(Math.abs(diff))} {diff > 0 ? "hoger" : "lager"} dan je bank</div>
+                <div style={{ fontSize: 12, color: "#7a5a1a", margin: "4px 0 8px" }}>Saldo volgens je laatste import: <b>{formatEUR(bankBalanceCents)}</b>. Mogelijk mis je transacties, staan er dubbele in, of klopt je startsaldo niet.</div>
+                <Btn size="sm" onClick={fixOpening}>Startsaldo gelijktrekken met de bank</Btn>
+              </div>
+            )
+          )}
           {fc.openingSet && (
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
               <span style={{ fontSize: 12, color: T.sub }}>Startsaldo</span>
@@ -841,25 +870,6 @@ function SaldoChart({ rows, currentMonth }) {
         </g>
       ))}
     </svg>
-  );
-}
-
-function AddPostRow({ groupId, categories, onAdd }) {
-  const [open, setOpen] = useState(false);
-  const [naam, setNaam] = useState("");
-  const groupType = ((categories || []).find((c) => c.groupId === groupId) || {}).type || "expense";
-  const add = () => { const n = naam.trim(); if (!n) return; onAdd(groupId, n, groupType); setNaam(""); setOpen(false); };
-  if (!open) return (
-    <div style={{ padding: "7px 16px", borderTop: `1px solid ${T.line}` }}>
-      <Btn variant="ghost" size="sm" onClick={() => setOpen(true)}>+ nieuwe post</Btn>
-    </div>
-  );
-  return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "8px 16px", borderTop: `1px solid ${T.line}`, background: "#fafcfb", flexWrap: "wrap" }}>
-      <input autoFocus value={naam} onChange={(e) => setNaam(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} placeholder="Naam van de post" style={{ ...inputStyle, width: 230, padding: "6px 10px", fontSize: 13 }} />
-      <Btn size="sm" onClick={add}>Toevoegen</Btn>
-      <Btn variant="ghost" size="sm" onClick={() => { setOpen(false); setNaam(""); }}>Annuleren</Btn>
-    </div>
   );
 }
 
@@ -1361,7 +1371,71 @@ function Posten({ groups, categories, transactions, onToggleNote, onUpdateCatego
   );
 }
 
-function Regels({ rules, categories, groups, onToggle, onDelete, onUpdate, onAdd, onAddDefaults }) {
+function RuleHygiene({ rules, categories, transactions = [], onBulkDelete }) {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState(null); // 'unused' | null
+  const catName = (id) => (categories.find((c) => c.id === id) || {}).naam || "(onbekende post)";
+  const norm = (r) => { const c = (r.conditions && r.conditions[0]) || {}; return { field: c.field, op: c.operator, val: String(c.value || "").trim().toLowerCase() }; };
+  const byFull = {};
+  for (const r of rules) { const n = norm(r); const k = `${r.categoryId}|${n.field}|${n.op}|${n.val}`; (byFull[k] = byFull[k] || []).push(r); }
+  const dupExtra = []; for (const k in byFull) if (byFull[k].length > 1) dupExtra.push(...byFull[k].slice(1).map((r) => r.id));
+  const byTrig = {};
+  for (const r of rules) { const n = norm(r); if (!n.val) continue; const k = `${n.field}|${n.op}|${n.val}`; (byTrig[k] = byTrig[k] || []).push(r); }
+  const conflicts = Object.values(byTrig).filter((arr) => new Set(arr.map((r) => r.categoryId)).size > 1);
+  const emptyIds = rules.filter((r) => { const n = norm(r); return n.op !== "amountRange" && !n.val; }).map((r) => r.id);
+  const hit = {}; for (const r of rules) hit[r.id] = 0;
+  for (const t of transactions) for (const r of rules) if (ruleMatches(t, r)) hit[r.id]++;
+  const unused = transactions.length ? rules.filter((r) => hit[r.id] === 0) : [];
+  const issues = dupExtra.length + conflicts.length + emptyIds.length;
+  const pill = (txt, tone) => <span style={{ fontSize: 12, fontWeight: 700, padding: "3px 9px", borderRadius: 999, background: tone === "ok" ? "#e7f4ec" : T.warnSoft, color: tone === "ok" ? T.pos : "#9a6a14" }}>{txt}</span>;
+  return (
+    <Card style={{ padding: 14, marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, fontSize: 14 }}>Regels opschonen</span>
+        {issues === 0 ? pill("alles ziet er netjes uit", "ok") : <>
+          {dupExtra.length > 0 && pill(`${dupExtra.length} dubbel`)}
+          {conflicts.length > 0 && pill(`${conflicts.length} conflict${conflicts.length > 1 ? "en" : ""}`)}
+          {emptyIds.length > 0 && pill(`${emptyIds.length} leeg`)}
+        </>}
+        {transactions.length > 0 && unused.length > 0 && pill(`${unused.length} ongebruikt`)}
+        <button onClick={() => setOpen((o) => !o)} style={{ marginLeft: "auto", border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>{open ? "verberg" : "bekijk & opschonen"}</button>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontSize: 12.5, color: T.sub }}>{rules.length} regels in totaal{transactions.length > 0 ? ` · gemeten op ${transactions.length} transacties` : " · importeer transacties om ongebruikte regels te vinden"}.</div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn size="sm" variant={dupExtra.length ? "secondary" : "ghost"} disabled={!dupExtra.length} onClick={() => onBulkDelete(dupExtra)}>Ontdubbel ({dupExtra.length})</Btn>
+            <Btn size="sm" variant={emptyIds.length ? "secondary" : "ghost"} disabled={!emptyIds.length} onClick={() => onBulkDelete(emptyIds)}>Verwijder lege ({emptyIds.length})</Btn>
+            {confirm === "unused"
+              ? <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><span style={{ fontSize: 12, color: T.neg }}>Zeker weten?</span><Btn size="sm" variant="danger" onClick={() => { onBulkDelete(unused.map((r) => r.id)); setConfirm(null); }}>Ja, verwijder {unused.length}</Btn><Btn size="sm" variant="ghost" onClick={() => setConfirm(null)}>Annuleer</Btn></span>
+              : <Btn size="sm" variant={unused.length ? "secondary" : "ghost"} disabled={!unused.length} onClick={() => setConfirm("unused")}>Verwijder ongebruikte ({unused.length})</Btn>}
+          </div>
+
+          {conflicts.length > 0 && (
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Conflicten — zelfde trefwoord, verschillende post (kies zelf welke klopt):</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {conflicts.slice(0, 8).map((arr, i) => (
+                  <div key={i} style={{ fontSize: 12.5, background: T.warnSoft, border: `1px solid #f0dcb8`, borderRadius: 7, padding: "7px 10px" }}>
+                    <b style={{ fontFamily: T.mono }}>"{norm(arr[0]).val}"</b> → {[...new Set(arr.map((r) => catName(r.categoryId)))].join("  ·  ")}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {transactions.length > 0 && unused.length > 0 && (
+            <div style={{ fontSize: 12, color: T.sub }}>Ongebruikt = matcht geen enkele bestaande transactie. Soms bewust (voor toekomstige uitgaven); verwijder alleen wat je niet meer nodig hebt.</div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function Regels({ rules, categories, groups, transactions = [], onToggle, onDelete, onBulkDelete, onUpdate, onAdd, onAddDefaults }) {
   const fl = { both: "naam of omschrijving", name: "naam", iban: "tegenrekening", description: "omschrijving", mutationType: "mutatiesoort" };
   const ol = { contains: "bevat", equals: "is", startsWith: "begint met" };
   const [sortKey, setSortKey] = useState("priority");
@@ -1386,7 +1460,7 @@ function Regels({ rules, categories, groups, onToggle, onDelete, onUpdate, onAdd
   );
   const catOptions = groups.map((g) => (
     <optgroup key={g.id} label={g.naam}>
-      {categories.filter((c) => c.groupId === g.id && c.id !== SLUITPOST_ID).map((c) => <option key={c.id} value={c.id}>{c.naam}</option>)}
+      {categories.filter((c) => c.groupId === g.id).map((c) => <option key={c.id} value={c.id}>{c.naam}</option>)}
     </optgroup>
   ));
   const submitNew = () => {
@@ -1399,6 +1473,8 @@ function Regels({ rules, categories, groups, onToggle, onDelete, onUpdate, onAdd
     <div>
       <SectionTitle right={<div style={{ display: "flex", gap: 8 }}>{onAddDefaults && <Btn variant="secondary" size="sm" onClick={onAddDefaults}>Standaardregels</Btn>}<Btn size="sm" onClick={() => setAdding((a) => !a)}>+ Nieuwe regel</Btn></div>}>Regels</SectionTitle>
       <div style={{ marginBottom: 14 }}><Banner tone="neutral">Regels categoriseren je transacties automatisch. Ze ontstaan vanzelf via "Onthoud dit" bij het importeren, maar je kunt ze hier ook zelf maken en aanpassen. Lagere prioriteit gaat vóór.</Banner></div>
+
+      <RuleHygiene rules={rules} categories={categories} transactions={transactions} onBulkDelete={onBulkDelete} />
 
       {adding && (
         <Card style={{ padding: 16, marginBottom: 14 }}>
@@ -1457,7 +1533,7 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
     let autoCount = 0;
     const committed = news.map((r) => {
       const tx = { ...r.item, hash: r.hash };
-      const match = categorize(tx, rules);
+      const match = categorize(tx, rules, categories);
       let allocations = [];
       if (match) { allocations = [{ categoryId: match.categoryId, amountCents: tx.amountCents }]; autoCount++; }
       return { ...tx, allocations, note: "", flagged: false };
@@ -1553,7 +1629,7 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
         ) : (
           <Card style={{ padding: 18, marginBottom: 16 }}>
             <div style={{ fontSize: 14, lineHeight: 1.7 }}>
-              <div><b style={{ color: T.pos }}>{parsed.autoCount}</b> automatisch herkend door je regels.</div>
+              <div><b style={{ color: T.pos }}>{parsed.autoCount}</b> automatisch herkend door je regels en spaarrekening-codes.</div>
               <div><b style={{ color: T.warn }}>{parsed.uncategorized}</b> nog toe te kennen — die loop je zo samen na, of vind je later op <b>Transacties</b>.</div>
             </div>
           </Card>
@@ -1701,11 +1777,52 @@ function TxRow({ tx, groups, categories, rules = [], history = [], years = [], o
   );
 }
 
-function Transacties({ groups, categories, year, years = [], transactions, rules = [], onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, kickReview }) {
+function DataCleanup({ year, years = [], txCount, onClearRange, onClearYear, onClearAll, onResetAll }) {
+  const months = ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+  const yearList = (years.length ? years : [year]).map((y) => y.jaartal).sort((a, b) => a - b);
+  const [fy, setFy] = useState(year.jaartal), [fm, setFm] = useState(1);
+  const [ty, setTy] = useState(year.jaartal), [tm, setTm] = useState(12);
+  const [confirm, setConfirm] = useState(null); // 'range' | 'year' | 'all' | 'reset'
+  const ss = { ...inputStyle, width: "auto", padding: "5px 8px", fontSize: 12 };
+  const fromKey = fy * 100 + fm, toKey = ty * 100 + tm;
+  const ConfirmRow = ({ id, label, onYes, danger }) => confirm === id ? (
+    <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontSize: 12, color: T.neg }}>Zeker weten?</span>
+      <Btn size="sm" variant="danger" onClick={() => { onYes(); setConfirm(null); }}>{label}</Btn>
+      <Btn size="sm" variant="ghost" onClick={() => setConfirm(null)}>Annuleer</Btn>
+    </span>
+  ) : <Btn size="sm" variant={danger ? "danger" : "secondary"} onClick={() => setConfirm(id)}>{label}</Btn>;
+  return (
+    <Card style={{ padding: 16, marginBottom: 14, border: `1px solid #f0dcb8`, background: "#fffdf8" }}>
+      <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Gegevens opschonen</div>
+      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 12 }}>Hiermee verwijder je ingelezen transacties. Je begroting, posten en regels blijven staan (tenzij je hieronder "opnieuw beginnen" kiest).</div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <span style={{ fontSize: 13, color: T.sub }}>Periode van</span>
+        <select value={fm} onChange={(e) => setFm(Number(e.target.value))} style={ss}>{months.map((nm, i) => <option key={i} value={i + 1}>{nm}</option>)}</select>
+        <select value={fy} onChange={(e) => setFy(Number(e.target.value))} style={ss}>{yearList.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+        <span style={{ fontSize: 13, color: T.sub }}>t/m</span>
+        <select value={tm} onChange={(e) => setTm(Number(e.target.value))} style={ss}>{months.map((nm, i) => <option key={i} value={i + 1}>{nm}</option>)}</select>
+        <select value={ty} onChange={(e) => setTy(Number(e.target.value))} style={ss}>{yearList.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+        <ConfirmRow id="range" label={`Verwijder ${months[fm - 1]} ${fy} t/m ${months[tm - 1]} ${ty}`} onYes={() => onClearRange(Math.min(fromKey, toKey), Math.max(fromKey, toKey))} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", borderTop: `1px solid ${T.line}`, paddingTop: 12 }}>
+        <ConfirmRow id="year" label={`Wis alle transacties van ${year.jaartal}`} onYes={onClearYear} />
+        <ConfirmRow id="all" label="Wis álle transacties (alle jaren)" onYes={onClearAll} />
+        <ConfirmRow id="reset" label="Opnieuw beginnen — wis alles behalve regels & inlog" onYes={onResetAll} danger />
+      </div>
+      {confirm === "reset" && <div style={{ fontSize: 12, color: T.neg, marginTop: 8 }}>Dit wist transacties, begrotingsbedragen, startsaldo en spaarsaldi en zet de posten terug naar de standaard. Je <b>regels</b> en <b>inlogaccounts</b> blijven.</div>}
+      <div style={{ fontSize: 12, color: T.sub, marginTop: 10 }}>Op dit moment {txCount} transactie(s) in totaal.</div>
+    </Card>
+  );
+}
+
+function Transacties({ groups, categories, year, years = [], transactions, rules = [], onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, kickReview }) {
+  const [showCleanup, setShowCleanup] = useState(false);
   const [maand, setMaand] = useState(0);
   const [status, setStatus] = useState("alle");
   const [q, setQ] = useState("");
-  const [confirmClear, setConfirmClear] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const names = ["alle maanden", "januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
   const yearTx = useMemo(() => transactions.filter((t) => effYear(t) === year.jaartal).slice().sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)), [transactions, year]);
@@ -1738,18 +1855,9 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <SectionTitle>Transacties {year.jaartal}</SectionTitle>
-        {onClearYear && yearTx.length > 0 && (
-          confirmClear ? (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: T.neg }}>Alle {yearTx.length} transacties van {year.jaartal} wissen?</span>
-              <button onClick={() => { onClearYear(); setConfirmClear(false); }} style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: T.neg, color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Ja, wissen</button>
-              <button onClick={() => setConfirmClear(false)} style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${T.line}`, background: T.panel, color: T.sub, fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Annuleer</button>
-            </div>
-          ) : (
-            <button onClick={() => setConfirmClear(true)} style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${T.line}`, background: T.panel, color: T.neg, fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Transacties {year.jaartal} wissen</button>
-          )
-        )}
+        {(onClearRange || onClearYear) && <Btn variant={showCleanup ? "secondary" : "ghost"} size="sm" onClick={() => setShowCleanup((s) => !s)}>{showCleanup ? "Opschonen sluiten" : "Opschonen / wissen"}</Btn>}
       </div>
+      {showCleanup && <div style={{ marginTop: 12 }}><DataCleanup year={year} years={years} txCount={transactions.length} onClearRange={onClearRange} onClearYear={onClearYear} onClearAll={onClearAll} onResetAll={onResetAll} /></div>}
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 14 }}>
         <Card style={{ padding: 14, flex: 1, minWidth: 150 }}><div style={{ fontSize: 12, color: T.sub, marginBottom: 3 }}>Transacties</div><div style={{ fontSize: 20, fontWeight: 700 }}>{yearTx.length}</div></Card>
         <Card style={{ padding: 14, flex: 1, minWidth: 150 }}><div style={{ fontSize: 12, color: T.sub, marginBottom: 3 }}>Nog toe te kennen</div><div style={{ fontSize: 20, fontWeight: 700, color: teSorteren ? T.warn : T.pos }}>{teSorteren}</div></Card>
@@ -1783,26 +1891,32 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
   );
 }
 
-function Vermogen({ pots, categories, transactions, onSetPotOpening }) {
+function Vermogen({ pots, categories, transactions, onSetPotOpening, onSetSpaarcode }) {
   const rows = pots.map((p) => {
     const cat = categories.find((c) => c.id === p.categoryId);
     let dep = 0, wd = 0;
     for (const t of transactions) for (const a of (t.allocations || [])) if (a.categoryId === p.categoryId) (a.amountCents < 0 ? (dep += Math.abs(a.amountCents)) : (wd += a.amountCents));
-    return { categoryId: p.categoryId, naam: cat ? cat.naam : p.categoryId, opening: p.opening, dep, wd, current: p.opening + dep - wd };
+    return { categoryId: p.categoryId, naam: cat ? cat.naam : p.categoryId, spaarcode: cat ? (cat.spaarcode || "") : "", opening: p.opening, dep, wd, current: p.opening + dep - wd };
   });
   const tot = rows.reduce((a, r) => ({ opening: a.opening + r.opening, dep: a.dep + r.dep, wd: a.wd + r.wd, current: a.current + r.current }), { opening: 0, dep: 0, wd: 0, current: 0 });
   const cols = "1fr 130px 110px 110px 130px";
   return (
     <div>
       <SectionTitle>Vermogen · opbouw per rekening</SectionTitle>
-      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Per spaar- of reserveringsrekening: het <b>startsaldo</b> (typ je zelf in), wat er dit jaar bij kwam en af ging, en het huidige saldo. Een storting herkent het systeem aan een overboeking náár die rekening (een uitgave op een spaarpost).</Banner></div>
+      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Per spaar- of reserveringsrekening: het <b>startsaldo</b> (typ je zelf in), wat er dit jaar bij kwam en af ging, en het huidige saldo. Vul de <b>Oranje-code</b> in (bijv. <span style={{ fontFamily: T.mono }}>H17729888</span>) — die staat in de mededelingen bij een over-/bijschrijving, en dan herkent de app stortingen en opnames automatisch en zet ze op de juiste rekening.</Banner></div>
       <Card style={{ overflow: "hidden" }}>
         <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
           <span>Rekening</span><span style={{ textAlign: "right" }}>Startsaldo</span><span style={{ textAlign: "right" }}>Bij</span><span style={{ textAlign: "right" }}>Af</span><span style={{ textAlign: "right" }}>Huidig saldo</span>
         </div>
         {rows.map((r, i) => (
           <div key={i} style={{ display: "grid", gridTemplateColumns: cols, gap: 10, alignItems: "center", padding: "10px 16px", borderTop: `1px solid ${T.line}` }}>
-            <span style={{ fontSize: 13, fontWeight: 500 }}>{r.naam}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>{r.naam}</div>
+              {onSetSpaarcode && <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+                <span style={{ fontSize: 11, color: T.sub }}>Oranje-code</span>
+                <input value={r.spaarcode} onChange={(e) => onSetSpaarcode(r.categoryId, e.target.value.trim())} placeholder="bijv. H17729888" style={{ ...inputStyle, width: 130, padding: "3px 7px", fontSize: 11, fontFamily: T.mono }} />
+              </div>}
+            </div>
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               {onSetPotOpening ? <MoneyInput cents={r.opening} width={120} onChange={(v) => onSetPotOpening(r.categoryId, v)} /> : <Money cents={r.opening} muted />}
             </div>
@@ -1829,6 +1943,7 @@ function ImportReview({ items, groups, categories, rules = [], history = [], yea
   const [i, setI] = useState(0);
   const [splitting, setSplitting] = useState(false);
   const [autoNext, setAutoNext] = useState(true);
+  const [autoLearn, setAutoLearn] = useState(false);
   const total = work.length;
   if (total === 0) return (
     <div>
@@ -1859,7 +1974,15 @@ function ImportReview({ items, groups, categories, rules = [], history = [], yea
   };
   const go = (d) => { setSplitting(false); setI((x) => Math.max(0, Math.min(total - 1, x + d))); };
   const ranked = !isSplit ? rankSuggestions(cur, rules, categories, history) : [];
-  const choosePost = (catId) => { setSingle(catId); if (autoNext && catId && i < total - 1) go(1); };
+  const sameCond = (r, kw) => r.conditions && r.conditions[0] && r.conditions[0].field === "both" && r.conditions[0].operator === "contains" && String(r.conditions[0].value).toLowerCase() === kw;
+  const choosePost = (catId) => {
+    setSingle(catId);
+    if (autoLearn && catId) {
+      const kw = (guessKeyword(cur.name) || guessKeyword(cur.omschrijving || cur.description || "") || "").trim().toLowerCase();
+      if (kw && !rules.some((r) => sameCond(r, kw) && r.categoryId === catId)) learnRule({ categoryId: catId, priority: 35, conditions: [{ field: "both", operator: "contains", value: kw }] });
+    }
+    if (autoNext && catId && i < total - 1) go(1);
+  };
 
   return (
     <div>
@@ -1901,14 +2024,21 @@ function ImportReview({ items, groups, categories, rules = [], history = [], yea
         {splitting && <div style={{ marginTop: 10 }}><SplitEditor tx={cur} categories={categories} groups={groups} onSave={(a) => { update({ allocations: a }); setSplitting(false); }} onCancel={() => setSplitting(false)} /></div>}
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13, color: T.sub }}>
-            <input type="checkbox" checked={autoNext} onChange={(e) => setAutoNext(e.target.checked)} />
-            Snel doorklikken — ga automatisch door na je keuze
-          </label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13, color: T.sub }}>
+              <input type="checkbox" checked={autoNext} onChange={(e) => setAutoNext(e.target.checked)} />
+              Snel doorklikken — ga automatisch door na je keuze
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13, color: T.sub }}>
+              <input type="checkbox" checked={autoLearn} onChange={(e) => setAutoLearn(e.target.checked)} />
+              Leer automatisch een regel van mijn keuze <span style={{ color: T.sub, fontSize: 11 }}>(maakt de regels slimmer)</span>
+            </label>
+          </div>
           {!splitting && !isSplit && <Btn variant="ghost" size="sm" onClick={() => setSplitting(true)}>Verdeel over meerdere posten</Btn>}
         </div>
 
-        {singleCat && !autoNext && <div style={{ marginTop: 12 }}><RuleLearn tx={cur} categoryId={singleCat} onAddRule={learnRule} /></div>}
+        {singleCat && !autoLearn && <div style={{ marginTop: 12 }}><RuleLearn tx={cur} categoryId={singleCat} onAddRule={learnRule} /></div>}
+        {autoLearn && singleCat && <div style={{ marginTop: 10, fontSize: 12, color: T.pos }}>✓ van deze keuze wordt automatisch een regel gemaakt</div>}
       </Card>
 
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
@@ -2040,6 +2170,8 @@ function mergeSeed(state) {
     if (changed) budgets[yid] = applySluitpost(cats, yl);
   }
   merged.budgets = budgets;
+  // vul ontbrekende Oranje-spaarrekeningcodes aan vanuit de seed (overschrijft eigen ingevulde codes niet)
+  for (const c of merged.categories) { if (!c.spaarcode) { const sc = seed.categories.find((x) => x.id === c.id); if (sc && sc.spaarcode) c.spaarcode = sc.spaarcode; } }
   if (merged.openingBalanceCents === undefined) merged.openingBalanceCents = null;
   return merged;
 }
@@ -2209,7 +2341,9 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     const existingHashes = new Map();
     for (const t of transactions) existingHashes.set(t.hash, (existingHashes.get(t.hash) || 0) + 1);
 
-    return { breakEven, monthRows, vitals, signals, currentMonth, existingHashes, accountBalance, forecast };
+    const bankBalanceCents = bankBalanceFromTxns(transactions);
+
+    return { breakEven, monthRows, vitals, signals, currentMonth, existingHashes, accountBalance, forecast, bankBalanceCents };
   }, [budgets, year, categories, transactions, pots, catById, openingBalanceCents]);
 
   const prevYear = years.find((y) => y.jaartal === year.jaartal - 1) || null;
@@ -2309,11 +2443,16 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const toggleRule = (id) => { setState((s) => ({ ...s, rules: s.rules.map((x) => (x.id === id ? { ...x, active: !x.active } : x)) })); logAction("regel aan-/uitgezet"); };
   const deleteRule = (id) => { setState((s) => ({ ...s, rules: s.rules.filter((x) => x.id !== id) })); logAction("regel verwijderd"); };
   const updateRule = (id, patch) => setState((s) => ({ ...s, rules: s.rules.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
-  const addRule = (rule) => { setState((s) => ({ ...s, rules: [...s.rules, { ...rule, id: "ru" + Math.random().toString(36).slice(2, 8), active: true }] })); logAction("regel toegevoegd"); };
+  const ruleSig = (r) => { const c = (r.conditions && r.conditions[0]) || {}; return `${r.categoryId}|${c.field}|${c.operator}|${String(c.value || "").toLowerCase()}`; };
+  const addRule = (rule) => { setState((s) => { const sig = ruleSig(rule); if (s.rules.some((x) => ruleSig(x) === sig)) return s; return { ...s, rules: [...s.rules, { ...rule, id: "ru" + Math.random().toString(36).slice(2, 8), active: true }] }; }); logAction("regel toegevoegd"); };
+  const bulkDeleteRules = (ids) => { const set = new Set(ids); setState((s) => ({ ...s, rules: s.rules.filter((x) => !set.has(x.id)) })); logAction("regels opgeschoond"); };
   const setTxAllocations = (txId, allocations) => { setState((s) => ({ ...s, transactions: s.transactions.map((t) => (t.id === txId ? { ...t, allocations } : t)) })); logAction(allocations.length === 0 ? "transactie op 'toe te kennen' gezet" : allocations.length > 1 ? "transactie over meerdere posten verdeeld" : "transactie ingedeeld"); };
   const setTxNote = (txId, note) => setState((s) => ({ ...s, transactions: s.transactions.map((t) => (t.id === txId ? { ...t, note } : t)) }));
   const toggleTxFlag = (txId) => setState((s) => ({ ...s, transactions: s.transactions.map((t) => (t.id === txId ? { ...t, flagged: !t.flagged } : t)) }));
   const clearYearTransactions = () => { setState((s) => ({ ...s, transactions: s.transactions.filter((t) => effYear(t) !== year.jaartal) })); logAction(`alle transacties van ${year.jaartal} gewist`); };
+  const clearTransactionsInRange = (fromKey, toKey) => { setState((s) => ({ ...s, transactions: s.transactions.filter((t) => { const k = effYear(t) * 100 + effMonth(t); return k < fromKey || k > toKey; }) })); logAction("transacties van een periode gewist"); };
+  const clearAllTransactions = () => { setState((s) => ({ ...s, transactions: [] })); logAction("alle transacties gewist"); };
+  const resetAllKeepRules = () => { setState((s) => { const fresh = buildSeed(); return { ...fresh, rules: s.rules }; }); logAction("opnieuw begonnen (regels behouden)"); };
   const patchTx = (txId, patch) => {
     setState((s) => ({ ...s, transactions: s.transactions.map((t) => (t.id === txId ? { ...t, ...patch } : t)) }));
     if (patch && patch.allocations) logAction(patch.allocations.length === 0 ? "transactie op 'toe te kennen' gezet" : patch.allocations.length > 1 ? "transactie over meerdere posten verdeeld" : "transactie ingedeeld");
@@ -2353,6 +2492,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     ["regels", "Regels", icons.regels],
     ["activiteit", "Activiteit", <><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 14" /></>],
   ];
+  const teSorterenBadge = transactions.reduce((n, t) => n + (effYear(t) === year.jaartal && (!t.allocations || t.allocations.length === 0) ? 1 : 0), 0);
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: T.bg, color: T.ink, fontFamily: T.sans }}>
@@ -2363,7 +2503,9 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
         </div>
         {nav.map(([id, label, icon]) => (
           <button key={id} onClick={() => setTab(id)} style={{ display: "flex", alignItems: "center", gap: 11, width: "100%", textAlign: "left", border: "none", cursor: "pointer", padding: "9px 10px", borderRadius: 8, marginBottom: 2, fontSize: 14, fontWeight: 600, background: tab === id ? T.accentSoft : "transparent", color: tab === id ? T.accent : T.sub }}>
-            <span style={{ color: tab === id ? T.accent : "#9aa8a5", display: "flex" }}><Icon d={icon} /></span>{label}
+            <span style={{ color: tab === id ? T.accent : "#9aa8a5", display: "flex" }}><Icon d={icon} /></span>
+            <span style={{ flex: 1 }}>{label}</span>
+            {id === "transacties" && teSorterenBadge > 0 && <span style={{ fontSize: 11, fontWeight: 700, minWidth: 18, textAlign: "center", padding: "1px 6px", borderRadius: 999, background: T.warn, color: "#fff" }}>{teSorterenBadge}</span>}
           </button>
         ))}
         <div style={{ position: "absolute", bottom: 16, left: 14, right: 14 }}>
@@ -2398,14 +2540,14 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
               <b>Let op: je gegevens worden nu in tijdelijk geheugen bewaard en verdwijnen bij een herstart van de server.</b> Koppel in Railway een PostgreSQL-database en zet de variabele <code>DATABASE_URL</code> (Railway doet dit meestal automatisch als je een Postgres-plugin toevoegt). Daarna wordt alles blijvend opgeslagen.
             </div>
           )}
-          {tab === "overzicht" && <Overzicht vitals={derived.vitals} signals={derived.signals} breakEven={derived.breakEven} monthRows={derived.monthRows} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} openingBalanceCents={openingBalanceCents} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
+          {tab === "overzicht" && <Overzicht vitals={derived.vitals} signals={derived.signals} breakEven={derived.breakEven} monthRows={derived.monthRows} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
           {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} />}
-          {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} kickReview={reviewKick} years={years} />}
+          {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} kickReview={reviewKick} years={years} />}
           {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} />}
-          {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} onSetPotOpening={setPotOpening} />}
+          {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} onSetPotOpening={setPotOpening} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
           {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
           {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} history={transactions} onCommit={commitImport} onStartReview={startReview} />}
-          {tab === "regels" && <Regels rules={rules} categories={categories} groups={groups} onToggle={toggleRule} onDelete={deleteRule} onUpdate={updateRule} onAdd={addRule} onAddDefaults={onAddDefaults} />}
+          {tab === "regels" && <Regels rules={rules} categories={categories} groups={groups} transactions={transactions} onToggle={toggleRule} onDelete={deleteRule} onBulkDelete={bulkDeleteRules} onUpdate={updateRule} onAdd={addRule} onAddDefaults={onAddDefaults} />}
           {tab === "activiteit" && <Activiteit />}
         </div>
       </main>
