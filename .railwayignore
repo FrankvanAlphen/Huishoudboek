@@ -1,6 +1,0 @@
-node_modules
-.next
-.git
-*.zip
-.DS_Store
-npm-debug.log*

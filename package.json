@@ -1,23 +1,20 @@
 {
-  "name": "kps3-financieel",
-  "version": "1.1.0",
+  "name": "huishoudboekje",
+  "version": "1.0.0",
   "private": true,
-  "engines": {
-    "node": ">=20 <23"
-  },
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start -p ${PORT:-3000}",
-    "lint": "next lint"
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server.js"
   },
   "dependencies": {
-    "next": "^15.3.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
-  },
-  "devDependencies": {
-    "eslint": "^9.0.0",
-    "eslint-config-next": "^15.3.0"
+    "@vitejs/plugin-react": "^4.3.2",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.8",
+    "xlsx": "^0.18.5"
   }
 }
