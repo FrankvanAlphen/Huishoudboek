@@ -233,32 +233,51 @@ function unknownSavingsCodes(transactions, categories) {
   return [...map.values()].sort((a, b) => b.count - a.count);
 }
 // ---- Vermogensmutaties: direct geboekt + afgeleid uit de omschrijving ----
-// Een interne overboeking wordt in het grootboek vaak op "Tussenrekening" geboekt; bij ING Oranje
-// Spaarrekeningen en Spaardeposito's is er dan géén tweede transactieregel. De vermogensmutatie
-// wordt daarom afgeleid uit de mededelingen. Uitsluitend BESTAANDE vermogensrekeningen; er wordt
-// hier nooit iets aangemaakt.
+// Een interne overboeking wordt in het grootboek vaak op "Tussenrekening" (of een andere gewone
+// post) geboekt; bij ING Oranje Spaarrekeningen en Spaardeposito's is er dan géén tweede
+// transactieregel. De vermogensmutatie wordt daarom afgeleid uit de mededelingen.
+// Uitsluitend BESTAANDE vermogensrekeningen; er wordt hier nooit iets aangemaakt.
+
+// Zoek de vermogensrekening die bij de mededelingen hoort. Resultaat:
+//   { cat }          — gevonden (via het Code/IBAN-veld, of via een expliciete code in de rekeningnaam)
+//   { unlinkedCode } — er staat wél een expliciete "Oranje spaarrekening/Spaardeposito <code>" in de
+//                      mededelingen, maar geen enkele bestaande vermogensrekening verwijst ernaar
+//   null             — geen aanwijzing voor een vermogensrekening
+function savingsCatForTx(tx, categories) {
+  const savings = (categories || []).filter((c) => c.type === "savings");
+  const text = `${tx.name || ""} ${tx.omschrijving || ""} ${tx.description || ""}`;
+  const hay = text.toLowerCase();
+  for (const c of savings) { const code = String(c.spaarcode || "").trim().toLowerCase(); if (code && hay.includes(code)) return { cat: c }; }
+  const code = extractOranjeCode(text);
+  if (code) { const m = savings.find((c) => String(c.naam || "").toUpperCase().includes(code)); return m ? { cat: m } : { unlinkedCode: code }; }
+  return null;
+}
 function derivedPotMutation(tx, categories) {
-  const m = matchSpaarcode(tx, categories);
-  if (!m) return null;
-  const cat = (categories || []).find((c) => c.id === m.categoryId);
-  if (!cat || cat.type !== "savings") return null; // alleen vermogensrekeningen
   // Al (deels) rechtstreeks op een vermogensrekening geboekt? Dan telt die directe boeking; niet dubbel afleiden.
   const savingsIds = new Set((categories || []).filter((c) => c.type === "savings").map((c) => c.id));
   if ((tx.allocations || []).some((a) => savingsIds.has(a.categoryId))) return null;
+  const hit = savingsCatForTx(tx, categories);
+  if (!hit || !hit.cat) return null;
   // Teken bepaalt de richting: geld verlaat de betaalrekening (−) = storting op de spaarrekening;
   // geld komt binnen (+) = opname van de spaarrekening.
-  return { categoryId: cat.id, amountCents: tx.amountCents };
+  return { categoryId: hit.cat.id, amountCents: tx.amountCents };
 }
 // Bij/Af per vermogensrekening: directe allocaties op de spaarpost + afgeleide mutaties.
 // Conventie (gelijk aan de bestaande): cents < 0 → storting (dep), cents > 0 → opname (wd).
+// depDerived/wdDerived = het deel dat uit de mededelingen is afgeleid (voor transparantie in de UI).
 function potFlows(transactions, categories) {
   const flows = new Map();
-  const bump = (cid, cents) => { const f = flows.get(cid) || { dep: 0, wd: 0 }; if (cents < 0) f.dep += Math.abs(cents); else f.wd += cents; flows.set(cid, f); };
+  const bump = (cid, cents, derived) => {
+    const f = flows.get(cid) || { dep: 0, wd: 0, depDerived: 0, wdDerived: 0 };
+    if (cents < 0) { f.dep += Math.abs(cents); if (derived) f.depDerived += Math.abs(cents); }
+    else { f.wd += cents; if (derived) f.wdDerived += cents; }
+    flows.set(cid, f);
+  };
   const savingsIds = new Set((categories || []).filter((c) => c.type === "savings").map((c) => c.id));
   for (const t of transactions || []) {
-    for (const a of (t.allocations || [])) if (savingsIds.has(a.categoryId)) bump(a.categoryId, a.amountCents);
+    for (const a of (t.allocations || [])) if (savingsIds.has(a.categoryId)) bump(a.categoryId, a.amountCents, false);
     const d = derivedPotMutation(t, categories);
-    if (d) bump(d.categoryId, d.amountCents);
+    if (d) bump(d.categoryId, d.amountCents, true);
   }
   return flows;
 }
@@ -877,6 +896,30 @@ const Toggle = ({ on, onClick }) => (
     <span style={{ position: "absolute", top: 2, left: on ? 18 : 2, width: 18, height: 18, borderRadius: "50%", background: "#fff" }} />
   </button>
 );
+// Laat op een transactie zien wat er met het Vermogen gebeurt op basis van de mededelingen:
+// groen = de vermogensrekening wordt automatisch bij-/afgeboekt; oranje = er staat een expliciete
+// spaarcode in de mededelingen die nog aan geen enkele rekening gekoppeld is.
+function VermogenHint({ tx, categories }) {
+  const d = derivedPotMutation(tx, categories);
+  if (d) {
+    const c = (categories || []).find((x) => x.id === d.categoryId);
+    const naar = d.amountCents < 0; // geld eraf = storting op de rekening
+    return (
+      <div style={{ fontSize: 12, background: "#eef7f0", border: "1px solid #cfe6d4", color: "#1f6b3a", borderRadius: 7, padding: "6px 10px" }}>
+        Vermogen: <b>{c ? c.naam : "rekening"}</b> wordt {naar ? "verhoogd" : "verlaagd"} met <b>{formatEUR(Math.abs(d.amountCents))}</b> — herkend uit de mededelingen; de post hierboven blijft gewoon staan.
+      </div>
+    );
+  }
+  const hit = savingsCatForTx(tx, categories);
+  if (hit && hit.unlinkedCode) {
+    return (
+      <div style={{ fontSize: 12, background: T.warnSoft, border: `1px solid ${T.warn}`, color: "#7a5a12", borderRadius: 7, padding: "6px 10px" }}>
+        In de mededelingen staat spaarcode <b style={{ fontFamily: T.mono }}>{hit.unlinkedCode}</b>, maar die is nog aan géén vermogensrekening gekoppeld — het Vermogen-tabblad verwerkt deze overboeking dus <b>niet</b>. Vul de code in bij de juiste rekening (tabblad Vermogen, veld Code/IBAN).
+      </div>
+    );
+  }
+  return null;
+}
 const SectionTitle = ({ children, right }) => (
   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "0 0 14px" }}>
     <h2 style={{ fontSize: 17, margin: 0 }}>{children}</h2>{right}
@@ -2596,6 +2639,7 @@ function TxRow({ tx, groups, categories, rules = [], history = [], years = [], n
         <div style={{ padding: "0 14px 14px 90px", display: "flex", flexDirection: "column", gap: 10 }}>
           {sign > 0 && <div style={{ fontSize: 12, color: T.sub }}>Geld terug dat je had voorgeschoten? Kies hierboven de <b>uitgavepost</b> waarop je het had geboekt; de teruggave verlaagt dan die post.</div>}
           {tx.description && tx.description !== tx.omschrijving && <div style={{ fontSize: 12, color: T.sub, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 7, padding: "6px 10px" }}><span style={{ fontWeight: 600 }}>Mededelingen: </span>{tx.description}</div>}
+          <VermogenHint tx={tx} categories={categories} />
           {isSplit && !splitting && (
             <div style={{ background: "#fff", border: `1px solid ${T.line}`, borderRadius: 7, padding: "8px 10px" }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: T.sub, marginBottom: 4 }}>Verdeling</div>
@@ -2940,12 +2984,12 @@ function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOp
   const potOf = (cid) => pots.find((x) => x.categoryId === cid) || {};
   const flows = potFlows(transactions, categories);
   const rows = categories.filter((c) => c.type === "savings").map((c) => {
-    const f = flows.get(c.id) || { dep: 0, wd: 0 };
-    const dep = f.dep, wd = f.wd;
+    const f = flows.get(c.id) || { dep: 0, wd: 0, depDerived: 0, wdDerived: 0 };
+    const dep = f.dep, wd = f.wd, depDerived = f.depDerived || 0, wdDerived = f.wdDerived || 0;
     const p = potOf(c.id);
     const opening = p.opening || 0, target = p.target || 0;
     const contrib = (budgetLines[c.id] || {}).average || 0;
-    return { categoryId: c.id, naam: c.naam, spaarcode: c.spaarcode || "", opening, dep, wd, current: opening + dep - wd, target, contrib };
+    return { categoryId: c.id, naam: c.naam, spaarcode: c.spaarcode || "", opening, dep, wd, depDerived, wdDerived, current: opening + dep - wd, target, contrib };
   });
   const tot = rows.reduce((a, r) => ({ opening: a.opening + r.opening, dep: a.dep + r.dep, wd: a.wd + r.wd, current: a.current + r.current }), { opening: 0, dep: 0, wd: 0, current: 0 });
   const cols = "1fr 130px 100px 100px 120px";
@@ -2970,6 +3014,7 @@ function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOp
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 3, flexWrap: "wrap" }}>
                     {onSetSpaarcode && <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 11, color: T.sub }}>Code/IBAN</span><input value={r.spaarcode} onChange={(e) => onSetSpaarcode(r.categoryId, e.target.value.trim())} placeholder="bijv. H17729888" style={{ ...inputStyle, width: 145, padding: "3px 7px", fontSize: 11, fontFamily: T.mono }} /></span>}
                     {onSetPotTarget && <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 11, color: T.sub }}>Doel</span><MoneyInput cents={r.target} width={100} onChange={(v) => onSetPotTarget(r.categoryId, v)} /></span>}
+                    {(r.depDerived > 0 || r.wdDerived > 0) && <span style={{ fontSize: 11, color: T.sub }} title="Overboekingen die op een andere post staan (bijv. Tussenrekening) maar via de code in de mededelingen aan deze rekening zijn toegerekend.">waarvan uit mededelingen: {r.depDerived > 0 ? `+ ${formatEUR(r.depDerived)}` : ""}{r.depDerived > 0 && r.wdDerived > 0 ? " · " : ""}{r.wdDerived > 0 ? `− ${formatEUR(r.wdDerived)}` : ""}</span>}
                   </div>
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>{onSetPotOpening ? <MoneyInput cents={r.opening} width={120} onChange={(v) => onSetPotOpening(r.categoryId, v)} /> : <Money cents={r.opening} muted />}</div>
@@ -3127,6 +3172,7 @@ function ImportReview({ items, groups, categories, rules = [], history = [], tra
           ? <div style={{ fontSize: 13, marginBottom: 4 }}>Verdeeld over {allocs.length} posten. <button onClick={() => setSplitting(true)} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontWeight: 600 }}>wijzig</button> · <button onClick={() => setSingle("")} style={{ border: "none", background: "transparent", color: T.sub, cursor: "pointer" }}>maak leeg</button></div>
           : <PostPicker key={cur.id} categories={categories} groups={groups} sign={sign} value={singleCat} suggestions={ranked} onChange={choosePost} autoFocus />}
         {sign > 0 && !isSplit && myLinks.length === 0 && openAdvances.length === 0 && <div style={{ fontSize: 12, color: T.sub, marginTop: 6 }}>Geld terug dat je had voorgeschoten? Kies de <b>uitgavepost</b> waarop je het had geboekt — die post wordt dan per saldo lager.</div>}
+        <div style={{ marginTop: 8 }}><VermogenHint tx={cur} categories={categories} /></div>
         {!isSplit && singleCat && subsOfCat(singleCat).length > 0 && (
           <div style={{ marginTop: 10, background: "#fff", border: `1px solid ${T.accent}`, borderRadius: 9, padding: "10px 12px" }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Stap 2 — kies een subpost van "{(categories.find((c) => c.id === singleCat) || {}).naam}":</div>
