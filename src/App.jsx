@@ -191,9 +191,10 @@ function matchSpaarcode(tx, categories) {
   return null;
 }
 // Haal een spaardeposito-/Oranje-spaarrekeningcode uit de mededelingen (bijv. "Oranje spaarrekening M96388351"
-// of "Naar Spaardeposito X15431287"). Alleen deze formuleringen tellen; code = optionele letter + 6–10 cijfers.
+// of "Naar Spaardeposito X15431287"). UITSLUITEND deze twee expliciete formuleringen tellen;
+// code = optionele letter + 6–10 cijfers. Woorden als "gespaard" of "spaargeld" zijn géén indicatie.
 function extractOranjeCode(text) {
-  const m = String(text || "").match(/(?:oranje\s+spaarrekening|oranje\s+rekening|spaardeposito)\s+([A-Za-z]?\d{6,10})\b/i);
+  const m = String(text || "").match(/(?:oranje\s+spaarrekening|spaardeposito)\s+([A-Za-z]?\d{6,10})\b/i);
   return m ? m[1].toUpperCase() : null;
 }
 // Korte typeaanduiding voor de hint (alleen als de code zelf geen omschrijving oplevert).
@@ -231,14 +232,45 @@ function unknownSavingsCodes(transactions, categories) {
   }
   return [...map.values()].sort((a, b) => b.count - a.count);
 }
+// ---- Vermogensmutaties: direct geboekt + afgeleid uit de omschrijving ----
+// Een interne overboeking wordt in het grootboek vaak op "Tussenrekening" geboekt; bij ING Oranje
+// Spaarrekeningen en Spaardeposito's is er dan géén tweede transactieregel. De vermogensmutatie
+// wordt daarom afgeleid uit de mededelingen. Uitsluitend BESTAANDE vermogensrekeningen; er wordt
+// hier nooit iets aangemaakt.
+function derivedPotMutation(tx, categories) {
+  const m = matchSpaarcode(tx, categories);
+  if (!m) return null;
+  const cat = (categories || []).find((c) => c.id === m.categoryId);
+  if (!cat || cat.type !== "savings") return null; // alleen vermogensrekeningen
+  // Al (deels) rechtstreeks op een vermogensrekening geboekt? Dan telt die directe boeking; niet dubbel afleiden.
+  const savingsIds = new Set((categories || []).filter((c) => c.type === "savings").map((c) => c.id));
+  if ((tx.allocations || []).some((a) => savingsIds.has(a.categoryId))) return null;
+  // Teken bepaalt de richting: geld verlaat de betaalrekening (−) = storting op de spaarrekening;
+  // geld komt binnen (+) = opname van de spaarrekening.
+  return { categoryId: cat.id, amountCents: tx.amountCents };
+}
+// Bij/Af per vermogensrekening: directe allocaties op de spaarpost + afgeleide mutaties.
+// Conventie (gelijk aan de bestaande): cents < 0 → storting (dep), cents > 0 → opname (wd).
+function potFlows(transactions, categories) {
+  const flows = new Map();
+  const bump = (cid, cents) => { const f = flows.get(cid) || { dep: 0, wd: 0 }; if (cents < 0) f.dep += Math.abs(cents); else f.wd += cents; flows.set(cid, f); };
+  const savingsIds = new Set((categories || []).filter((c) => c.type === "savings").map((c) => c.id));
+  for (const t of transactions || []) {
+    for (const a of (t.allocations || [])) if (savingsIds.has(a.categoryId)) bump(a.categoryId, a.amountCents);
+    const d = derivedPotMutation(t, categories);
+    if (d) bump(d.categoryId, d.amountCents);
+  }
+  return flows;
+}
 function categorize(tx, rules, categories) {
-  const sc = matchSpaarcode(tx, categories); // accountnummer is het betrouwbaarst — gaat vóór gewone regels
-  if (sc) return sc;
   const sign = tx.amountCents < 0 ? -1 : 1;
   const catById = (id) => (categories || []).find((c) => c.id === id);
   let best = null;
   for (const r of rules) { if (r.active && ruleMatches(tx, r) && catAllowed(catById(r.categoryId), sign) && (!best || r.priority < best.priority)) best = r; }
-  return best ? { categoryId: best.categoryId, ruleId: best.id } : null;
+  if (best) return { categoryId: best.categoryId, ruleId: best.id }; // eigen regels (bijv. Tussenrekening) gaan vóór
+  const sc = matchSpaarcode(tx, categories); // vangnet: accountcode in de mededelingen
+  if (sc) return sc;
+  return null;
 }
 // Mag deze post bij dit bedrag? Inkomsten alleen bij positieve mutaties; verder alles (incl. sparen).
 const catAllowed = (c, sign) => !!c && (sign >= 0 || c.type !== "income");
@@ -2906,9 +2938,10 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
 
 function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOpening, onSetSpaarcode, onSetPotTarget }) {
   const potOf = (cid) => pots.find((x) => x.categoryId === cid) || {};
+  const flows = potFlows(transactions, categories);
   const rows = categories.filter((c) => c.type === "savings").map((c) => {
-    let dep = 0, wd = 0;
-    for (const t of transactions) for (const a of (t.allocations || [])) if (a.categoryId === c.id) (a.amountCents < 0 ? (dep += Math.abs(a.amountCents)) : (wd += a.amountCents));
+    const f = flows.get(c.id) || { dep: 0, wd: 0 };
+    const dep = f.dep, wd = f.wd;
     const p = potOf(c.id);
     const opening = p.opening || 0, target = p.target || 0;
     const contrib = (budgetLines[c.id] || {}).average || 0;
@@ -2919,7 +2952,7 @@ function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOp
   return (
     <div>
       <SectionTitle>Vermogen · opbouw per rekening</SectionTitle>
-      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Per spaar- of reserveringsrekening: het <b>startsaldo</b>, wat er dit jaar bij/af ging en het huidige saldo. Vul de <b>code of tegenrekening-IBAN</b> in, dan herkent de app stortingen en opnames automatisch. Zet een <b>doel</b> en ik toon de voortgang — met een maandinleg in je begroting ook een prognose.</Banner></div>
+      <div style={{ marginBottom: 14 }}><Banner tone="neutral">Per spaar- of reserveringsrekening: het <b>startsaldo</b>, wat er bij/af ging en het huidige saldo. Vul de <b>code of tegenrekening-IBAN</b> in, dan herkent de app stortingen en opnames automatisch — <b>ook als de transactie zelf op een andere post staat</b> (bijv. Tussenrekening): bij "Naar Spaardeposito X…" of "Van Oranje spaarrekening M…" in de mededelingen wordt de juiste rekening vanzelf bij- of afgeboekt. Zet een <b>doel</b> en ik toon de voortgang — met een maandinleg in je begroting ook een prognose.</Banner></div>
       <Card style={{ overflow: "hidden" }}>
         <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
           <span>Rekening</span><span style={{ textAlign: "right" }}>Startsaldo</span><span style={{ textAlign: "right" }}>Bij</span><span style={{ textAlign: "right" }}>Af</span><span style={{ textAlign: "right" }}>Huidig saldo</span>
@@ -3397,11 +3430,11 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     const monthRows = computeRunningSaldo(year.carryInCents, actuals);
     const deviation = computeBudgetDeviation(actuals.map((a) => a.income - a.expense), budgetNet);
 
+    const potFlowMap = potFlows(transactions, categories);
     const vermogen = categories.filter((c) => c.type === "savings").reduce((sum, c) => {
       const pot = pots.find((p) => p.categoryId === c.id);
-      let dep = 0, wd = 0;
-      for (const t of transactions) for (const a of t.allocations) if (a.categoryId === c.id) (a.amountCents < 0 ? (dep += Math.abs(a.amountCents)) : (wd += a.amountCents));
-      return sum + (pot ? pot.opening : 0) + dep - wd;
+      const f = potFlowMap.get(c.id) || { dep: 0, wd: 0 };
+      return sum + (pot ? pot.opening : 0) + f.dep - f.wd;
     }, 0);
 
     const vitals = { saldo: monthRows[currentMonth - 1].end, deviation: deviation[currentMonth - 1], vermogen, potCount: categories.filter((c) => c.type === "savings").length };
