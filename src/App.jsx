@@ -50,9 +50,6 @@ function parseINGDate(s) {
   if ((m = t.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/))) return `${m[3]}-${String(m[2]).padStart(2, "0")}-${String(m[1]).padStart(2, "0")}`;
   throw new Error(`Ongeldige datum: ${s}`);
 }
-const monthOf = (iso) => Number(iso.slice(5, 7));
-// In overzichten toont een eigen notitie zich in plaats van de bank-omschrijving.
-const txDesc = (t) => (t && t.note && t.note.trim()) ? t.note.trim() : ((t && (t.omschrijving || t.name)) || "");
 // Een transactie kan optioneel in een andere periode meetellen dan z'n datum (bijv. een 2027-datum die voor 2026 is).
 const effDate = (t) => (t && t.periodDate) ? t.periodDate : (t ? t.date : "");
 const effYear = (t) => Number(effDate(t).slice(0, 4));
@@ -64,11 +61,6 @@ const sumMonths = (m) => m.reduce((a, b) => a + b, 0);
 function checkDistribution(avg, months) {
   const target = avg * 12, actual = sumMonths(months);
   return { ok: actual - target === 0, target, actual, diff: actual - target };
-}
-function computeBreakEven(lines) {
-  let income = 0, outflow = 0;
-  for (const l of lines) (l.type === "income" ? (income += l.annual) : (outflow += l.annual));
-  return { income, outflow, diff: income - outflow, ok: income - outflow === 0 };
 }
 
 /* ----------------------------------------------------------------- Saldo */
@@ -188,36 +180,30 @@ function matchCondition(tx, c) {
 const ruleMatches = (tx, r) => r.conditions.length > 0 && r.conditions.every((c) => matchCondition(tx, c));
 function matchSpaarcode(tx, categories) {
   if (!categories) return null;
-  const hay = `${tx.name || ""} ${tx.omschrijving || ""} ${tx.description || ""} ${tx.iban || ""}`.toLowerCase();
+  const hay = `${tx.name || ""} ${tx.omschrijving || ""} ${tx.description || ""}`.toLowerCase();
   for (const c of categories) {
     const code = String(c.spaarcode || "").trim().toLowerCase();
     if (code && hay.includes(code)) return { categoryId: c.id, ruleId: "spaarcode" };
   }
   return null;
 }
-// Haal een spaar-/beleggingsrekeningcode uit de mededelingen (bijv. "Oranje spaarrekening M96388351 ..."
-// of "Aandelenrekening 15593447 ..."). Code = optionele letter + 6–10 cijfers, verankerd aan een rekeningwoord.
+// Haal een spaardeposito-/Oranje-spaarrekeningcode uit de mededelingen (bijv. "Oranje spaarrekening M96388351"
+// of "Naar Spaardeposito X15431287"). Alleen deze formuleringen tellen; code = optionele letter + 6–10 cijfers.
 function extractOranjeCode(text) {
-  const m = String(text || "").match(/(?:oranje\s+\S+|spaar\S*|deposito|aandelen\S*|belegg\S*|effecten\S*)\s+([A-Za-z]?\d{6,10})\b/i);
+  const m = String(text || "").match(/(?:oranje\s+spaarrekening|oranje\s+rekening|spaardeposito)\s+([A-Za-z]?\d{6,10})\b/i);
   return m ? m[1].toUpperCase() : null;
 }
-// Herkent een spaar-/beleggingswoord in de tekst (voor spaarrekeningen zonder Oranje-code).
+// Korte typeaanduiding voor de hint (alleen als de code zelf geen omschrijving oplevert).
 function savingsKeyword(text) {
-  const m = String(text || "").match(/\b(spaardeposito|spaarrekening|spaargeld|gespaard|deposito|beleggersrekening|aandelenrekening|effectenrekening|beleggen|bonusrenterekening)\b/i);
+  const m = String(text || "").match(/\b(spaardeposito|spaarrekening|spaargeld)\b/i);
   return m ? m[1] : "";
 }
-// Bepaal de spaarrekening waar een mutatie bij hoort: eerst een expliciete Oranje-code,
-// anders — als de mutatie spaar-gerelateerd is — de tegenrekening-IBAN (bijv. een ABN-spaarrekening).
+// Bepaal de spaarrekening waar een mutatie bij hoort — uitsluitend via een expliciete
+// "Oranje spaarrekening"- of "Spaardeposito"-code in de mededelingen.
 function extractSavingsAccount(tx) {
   const text = `${tx.name || ""} ${tx.omschrijving || ""} ${tx.description || ""}`;
   const code = extractOranjeCode(text);
   if (code) return { id: code, kind: "code", hint: savingsHint(tx.description || "", code) || savingsKeyword(text) };
-  const kw = savingsKeyword(text);
-  const iban = String(tx.iban || "").replace(/\s+/g, "").toUpperCase();
-  if (kw && /^[A-Z]{2}\d{2}[A-Z0-9]{8,30}$/.test(iban)) {
-    const om = String(tx.omschrijving || "").trim();
-    return { id: iban, kind: "iban", hint: om && om.length <= 40 ? om : kw };
-  }
   return null;
 }
 // Korte omschrijving van het rekeningtype dat na de code staat (t/m vóór "Valutadatum").
@@ -523,7 +509,6 @@ function parseBudgetRows(rows, categories) {
   return { updates, matched, unmatched };
 }
 
-const yearOf = (iso) => Number(iso.slice(0, 4));
 function txYearActuals(transactions, categories, jaartal) {
   const actuals = Array.from({ length: 12 }, () => ({ income: 0, expense: 0 }));
   const catType = {}; for (const c of categories) catType[c.id] = c.type;
@@ -1010,7 +995,7 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 /* PAGINA'S                                                              */
 /* ===================================================================== */
 
-function Overzicht({ vitals, breakEven, monthRows, currentMonth, jaar, openActions, forecast, openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
+function Overzicht({ vitals, monthRows, currentMonth, jaar, openActions, forecast, openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
   const [reopen, setReopen] = useState(false);
   const tile = (label, node, sub, onClick) => (
     <Card onClick={onClick} style={{ padding: 18, flex: 1, minWidth: 190, cursor: onClick ? "pointer" : "default" }}>
@@ -1518,13 +1503,101 @@ function MonthEditor({ line, onSave }) {
   );
 }
 
+function AbonnementenScan({ categories, lines, actualByCat, monthsElapsed }) {
+  const aboCats = categories.filter((c) => c.groupId === "abonnementen" && c.type === "expense");
+  if (aboCats.length === 0) return <Card style={{ padding: 18 }}><div style={{ fontSize: 13, color: T.sub }}>Geen posten in de groep Abonnementen. Voeg ze toe op <b>Begroting</b>, dan verschijnen ze hier met hun jaarbedrag.</div></Card>;
+  const rows = aboCats.map((c) => {
+    const monthly = (lines[c.id] || {}).average || 0;
+    const actualYTD = Math.abs(sumMonths(actualByCat[c.id] || []));
+    return { id: c.id, naam: c.naam, monthly, yearly: monthly * 12, actualYTD };
+  }).sort((a, b) => b.yearly - a.yearly);
+  const totMonthly = rows.reduce((s, r) => s + r.monthly, 0), totYearly = totMonthly * 12, totActual = rows.reduce((s, r) => s + r.actualYTD, 0);
+  const gcols = "1fr 118px 118px 128px";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card style={{ padding: 18, background: "#f3f8f6", border: `1px solid ${T.accent}` }}>
+        <div style={{ fontSize: 13, color: T.sub, marginBottom: 4 }}>Je abonnementen kosten je samen</div>
+        <div style={{ fontSize: 28, fontWeight: 800 }}>{formatEUR(totYearly)} <span style={{ fontSize: 15, fontWeight: 600, color: T.sub }}>per jaar</span></div>
+        <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>= {formatEUR(totMonthly)} per maand begroot · {formatEUR(totActual)} werkelijk besteed dit jaar</div>
+      </Card>
+      <Card style={{ overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: gcols, gap: 10, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
+          <span>Abonnement</span><span style={{ textAlign: "right" }}>Per maand</span><span style={{ textAlign: "right" }}>Per jaar</span><span style={{ textAlign: "right" }}>Besteed dit jaar</span>
+        </div>
+        {rows.map((r) => (
+          <div key={r.id} style={{ display: "grid", gridTemplateColumns: gcols, gap: 10, alignItems: "center", padding: "9px 16px", borderTop: `1px solid ${T.line}` }}>
+            <span style={{ fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{r.naam}</span>
+            <span style={{ textAlign: "right", fontFamily: T.mono, fontSize: 13 }}>{r.monthly ? formatEUR(r.monthly) : "—"}</span>
+            <span style={{ textAlign: "right", fontFamily: T.mono, fontSize: 13, fontWeight: 600 }}>{r.yearly ? formatEUR(r.yearly) : "—"}</span>
+            <span style={{ textAlign: "right", fontFamily: T.mono, fontSize: 13, color: T.sub }}>{r.actualYTD ? formatEUR(r.actualYTD) : "—"}</span>
+          </div>
+        ))}
+        <div style={{ display: "grid", gridTemplateColumns: gcols, gap: 10, alignItems: "center", padding: "12px 16px", borderTop: `2px solid ${T.line}`, background: "#f7faf9" }}>
+          <span style={{ fontSize: 13, fontWeight: 700 }}>Totaal</span>
+          <span style={{ textAlign: "right", fontFamily: T.mono, fontWeight: 700 }}>{formatEUR(totMonthly)}</span>
+          <span style={{ textAlign: "right", fontFamily: T.mono, fontWeight: 800 }}>{formatEUR(totYearly)}</span>
+          <span style={{ textAlign: "right", fontFamily: T.mono, fontWeight: 700, color: T.sub }}>{formatEUR(totActual)}</span>
+        </div>
+      </Card>
+      <div style={{ fontSize: 12, color: T.sub }}>Tip: zet elke maandprijs bij de post op <b>Begroting</b>. Een abonnement dat je nauwelijks gebruikt is vaak de makkelijkste besparing.</div>
+    </div>
+  );
+}
+function Sparkline({ values, width = 130, height = 30 }) {
+  const max = Math.max(1, ...values);
+  const n = values.length;
+  const step = n > 1 ? width / (n - 1) : width;
+  const pts = values.map((v, i) => `${(i * step).toFixed(1)},${(height - (v / max) * (height - 5) - 3).toFixed(1)}`).join(" ");
+  const last = values.length ? values[values.length - 1] : 0;
+  const lx = (n - 1) * step, ly = height - (last / max) * (height - 5) - 3;
+  return (
+    <svg width={width} height={height} style={{ display: "block" }}>
+      {n > 1 && <polyline points={pts} fill="none" stroke={T.accent} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />}
+      {n > 0 && <circle cx={lx.toFixed(1)} cy={ly.toFixed(1)} r="2.5" fill={T.accent} />}
+    </svg>
+  );
+}
+function TrendView({ categories, actualByCat, names, monthsElapsed }) {
+  const rows = categories.filter((c) => c.type === "expense").map((c) => {
+    const monthly = (actualByCat[c.id] || Array.from({ length: 12 }, () => 0)).map((v) => Math.abs(v)).slice(0, monthsElapsed);
+    const total = monthly.reduce((s, v) => s + v, 0);
+    const thisM = monthly[monthsElapsed - 1] || 0;
+    const avg = monthsElapsed > 0 ? total / monthsElapsed : 0;
+    return { c, monthly, total, thisM, avg };
+  }).filter((r) => r.total > 0).sort((a, b) => b.total - a.total);
+  if (rows.length === 0) return <Card style={{ padding: 18 }}><div style={{ fontSize: 13, color: T.sub }}>Nog geen uitgaven om een trend te tonen.</div></Card>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 12, color: T.sub }}>Per post het verloop over de maanden. De pijl vergelijkt deze maand ({names[monthsElapsed - 1]}) met je gemiddelde — omhoog (rood) is meer uitgeven dan gemiddeld.</div>
+      <Card style={{ overflow: "hidden" }}>
+        {rows.map((r, i) => {
+          const diff = r.thisM - r.avg;
+          const up = diff > r.avg * 0.05, down = diff < -r.avg * 0.05;
+          return (
+            <div key={r.c.id} style={{ display: "grid", gridTemplateColumns: "1fr 140px 150px", gap: 12, alignItems: "center", padding: "10px 16px", borderTop: i ? `1px solid ${T.line}` : "none" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.c.naam.split(":")[0]}</div>
+                <div style={{ fontSize: 11.5, color: T.sub }}>deze maand {formatEUR(r.thisM)} · gem {formatEUR(Math.round(r.avg))}</div>
+              </div>
+              <Sparkline values={r.monthly} />
+              <div style={{ textAlign: "right", fontSize: 12.5, fontWeight: 700, color: up ? T.neg : down ? T.pos : T.sub }}>
+                {up ? "↑" : down ? "↓" : "→"} {diff === 0 ? "gelijk" : `${diff > 0 ? "+" : "−"}${formatEUR(Math.abs(diff))}`} <span style={{ color: T.sub, fontWeight: 400 }}>vs gem</span>
+              </div>
+            </div>
+          );
+        })}
+      </Card>
+    </div>
+  );
+}
+
 function Uitgaven({ groups, categories, budgets, year, years = [], transactions, onAddCategory, onSetYtd, onSetSubBudget }) {
   const [expanded, setExpanded] = useState(null);
   const [view, setView] = useState("vergelijking"); // vergelijking | blokjes | maand
   const [viewYearId, setViewYearId] = useState(year.id);
   const vY = years.find((y) => y.id === viewYearId) || year;
   const monthsElapsed = useMemo(() => { let m = 1; for (const t of transactions) if (effYear(t) === vY.jaartal) m = Math.max(m, effMonth(t)); return m; }, [transactions, vY]);
-  const lines = applySluitpost(categories, budgets[vY.id] || {});
+  const lines = useMemo(() => applySluitpost(categories, budgets[vY.id] || {}), [categories, budgets, vY]);
   const blocksByCat = useMemo(() => {
     const map = {};
     for (const t of transactions) {
@@ -1569,7 +1642,7 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
             </div>
           )}
           <div style={{ display: "inline-flex", border: `1px solid ${T.line}`, borderRadius: 9, overflow: "hidden" }}>
-            {[["vergelijking", "Vergelijking"], ["analyse", "Begroot vs besteed"], ["maand", "Per maand"], ["winkels", "Per winkel"], ["subposten", "Subposten"], ["bundels", "Bundels"], ["blokjes", "Blokjes per post"]].map(([v, lbl]) => (
+            {[["vergelijking", "Vergelijking"], ["analyse", "Begroot vs besteed"], ["maand", "Per maand"], ["trend", "Trend"], ["winkels", "Per winkel"], ["subposten", "Subposten"], ["abonnementen", "Abonnementen"], ["bundels", "Bundels"], ["blokjes", "Blokjes per post"]].map(([v, lbl]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding: "7px 13px", border: "none", background: view === v ? T.accent : T.panel, color: view === v ? "#fff" : T.sub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{lbl}</button>
             ))}
           </div>
@@ -1637,6 +1710,8 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
       {view === "subposten" && <SubpostView categories={categories} transactions={transactions} vY={vY} monthsElapsed={monthsElapsed} onSetSubBudget={onSetSubBudget} />}
       {view === "bundels" && <BundelView transactions={transactions} categories={categories} />}
       {view === "maand" && <MaandMatrix groups={groups} categories={categories} lines={lines} actualByCat={actualByCat} names={names} />}
+      {view === "trend" && <TrendView categories={categories} actualByCat={actualByCat} names={names} monthsElapsed={monthsElapsed} />}
+      {view === "abonnementen" && <AbonnementenScan categories={categories} lines={lines} actualByCat={actualByCat} monthsElapsed={monthsElapsed} />}
     </div>
   );
 }
@@ -2687,33 +2762,49 @@ function ManualTxForm({ onAdd, onClose }) {
   );
 }
 
-function UnknownSavingsRow({ u, onCreate }) {
+function UnknownSavingsRow({ u, savingsCats, onCreate, onLink }) {
+  const preMatch = savingsCats.find((c) => c.naam.toUpperCase().includes(u.code.toUpperCase()));
   const [naam, setNaam] = useState(u.hint || "");
+  const [linkTo, setLinkTo] = useState(preMatch ? preMatch.id : "");
   const richting = u.inCents > 0 && u.outCents > 0 ? "in- en uitgaand" : u.inCents > 0 ? "geld binnengekomen" : "geld naartoe";
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 0", borderTop: `1px solid ${T.line}` }}>
-      <div style={{ minWidth: 140, flex: 1 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>{u.kind === "iban" ? "Rekening" : "Code"} <span style={{ fontFamily: T.mono }}>{u.code}</span>{u.hint ? ` · ${u.hint}` : ""}</div>
-        <div style={{ fontSize: 11.5, color: T.sub }}>{u.count} transactie{u.count > 1 ? "s" : ""} · {richting}</div>
+    <div style={{ padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Code <span style={{ fontFamily: T.mono }}>{u.code}</span>{u.hint ? ` · ${u.hint}` : ""}</div>
+      <div style={{ fontSize: 11.5, color: T.sub, marginBottom: 8 }}>{u.count} transactie{u.count > 1 ? "s" : ""} · {richting}</div>
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end" }}>
+        {savingsCats.length > 0 && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: T.sub }}>Koppel aan bestaande rekening</span>
+            <select value={linkTo} onChange={(e) => setLinkTo(e.target.value)} style={{ ...inputStyle, width: 220, padding: "6px 8px", fontSize: 13 }}>
+              <option value="">— kies rekening —</option>
+              {savingsCats.map((c) => <option key={c.id} value={c.id}>{c.naam}</option>)}
+            </select>
+            <Btn size="sm" disabled={!linkTo} onClick={() => linkTo && onLink(linkTo, u.code)}>Koppel</Btn>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: T.sub }}>of nieuw</span>
+          <input value={naam} onChange={(e) => setNaam(e.target.value)} placeholder="naam nieuwe rekening" style={{ ...inputStyle, width: 190, padding: "6px 8px", fontSize: 13 }} />
+          <Btn size="sm" variant="secondary" onClick={() => onCreate(u.code, naam.trim() || `Spaarrekening ${u.code}`)}>Aanmaken</Btn>
+        </div>
       </div>
-      <input value={naam} onChange={(e) => setNaam(e.target.value)} placeholder="naam van de rekening, bijv. Spaardeposito auto" style={{ ...inputStyle, width: 230, padding: "6px 8px", fontSize: 13 }} />
-      <Btn size="sm" onClick={() => onCreate(u.code, naam.trim() || `Spaarrekening ${u.code}`)}>Aanmaken &amp; koppelen</Btn>
     </div>
   );
 }
-function OnbekendeSpaarrekeningen({ transactions, categories, onCreateSavings }) {
+function OnbekendeSpaarrekeningen({ transactions, categories, onCreateSavings, onLinkSavings }) {
   const unknown = unknownSavingsCodes(transactions, categories);
   if (unknown.length === 0) return null;
+  const savingsCats = categories.filter((c) => c.type === "savings");
   return (
     <Card style={{ padding: 14, marginBottom: 14, border: `1px solid ${T.warn}`, background: T.warnSoft }}>
-      <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Onbekende spaarrekening{unknown.length > 1 ? "en" : ""} gevonden</div>
-      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 4 }}>Er staat geld dat van of naar een spaarrekening gaat die de app nog niet kent (herkend aan de Oranje-code in de mededelingen). Maak 'm aan, dan koppel ik de code en zet ik alle bijbehorende over-/bijschrijvingen meteen op die rekening — daarna verschijnt hij op het Vermogen-tabblad.</div>
-      {unknown.map((u) => <UnknownSavingsRow key={u.code} u={u} onCreate={onCreateSavings} />)}
+      <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Spaarrekening-mutatie{unknown.length > 1 ? "s" : ""} nog niet gekoppeld</div>
+      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 4 }}>Er gaat geld van of naar een spaarrekening (herkend aan de code in de mededelingen) die nog niet aan een rekening hangt. <b>Koppel de code aan je bestaande rekening</b> — dan herkent de app 'm voortaan vanzelf en boek ik de bijbehorende over-/bijschrijvingen er meteen op, ook die je al ergens anders had gezet. Of maak een nieuwe rekening aan.</div>
+      {unknown.map((u) => <UnknownSavingsRow key={u.code} u={u} savingsCats={savingsCats} onCreate={onCreateSavings} onLink={onLinkSavings} />)}
     </Card>
   );
 }
 
-function Transacties({ groups, categories, year, years = [], transactions, rules = [], onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview }) {
+function Transacties({ groups, categories, year, years = [], transactions, rules = [], onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview }) {
   const [showCleanup, setShowCleanup] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [showVoorschot, setShowVoorschot] = useState(false);
@@ -2750,7 +2841,7 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
           {(onClearRange || onClearYear) && <Btn variant={showCleanup ? "secondary" : "ghost"} size="sm" onClick={() => { setShowCleanup((s) => !s); setShowManual(false); setShowVoorschot(false); }}>{showCleanup ? "Opschonen sluiten" : "Opschonen / wissen"}</Btn>}
         </div>
       </div>
-      {onCreateSavings && <OnbekendeSpaarrekeningen transactions={transactions} categories={categories} onCreateSavings={onCreateSavings} />}
+      {onCreateSavings && <OnbekendeSpaarrekeningen transactions={transactions} categories={categories} onCreateSavings={onCreateSavings} onLinkSavings={onLinkSavings} />}
       {showManual && <div style={{ marginTop: 12 }}><ManualTxForm onAdd={onAddManual} onClose={() => setShowManual(false)} /></div>}
       {showVoorschot && <div style={{ marginTop: 12 }}><VoorschotPanel transactions={transactions} categories={categories} onLinkSettle={onLinkSettle} onUnlinkSettle={onUnlinkSettle} onUnsettle={onUnsettle} onPatch={onSaveOne} /></div>}
       {showCleanup && <div style={{ marginTop: 12 }}><DataCleanup year={year} years={years} txCount={transactions.length} onClearRange={onClearRange} onClearYear={onClearYear} onClearAll={onClearAll} onResetAll={onResetAll} /></div>}
@@ -3284,13 +3375,10 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const derived = useMemo(() => {
     const lines = applySluitpost(categories, budgets[year.id] || {});
     const budgetNet = Array.from({ length: 12 }, () => 0);
-    const beLines = [];
     for (const c of categories) {
-      const line = lines[c.id], months = line ? line.months : null, annual = months ? sumMonths(months) : 0;
-      beLines.push({ type: c.type, annual });
+      const line = lines[c.id], months = line ? line.months : null;
       if (months) for (let m = 0; m < 12; m++) budgetNet[m] += c.type === "income" ? months[m] : -months[m];
     }
-    const breakEven = computeBreakEven(beLines);
 
     const yearTx = transactions.filter((t) => effYear(t) === year.jaartal);
     const actuals = Array.from({ length: 12 }, () => ({ income: 0, expense: 0 }));
@@ -3368,7 +3456,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
       if (c.vast) vastMonthly += line.average; else varMonthly += line.average;
     }
 
-    return { breakEven, monthRows, vitals, currentMonth, existingHashes, accountBalance, forecast, bankBalanceCents, saldoGaps, chainOpening, freqAlerts, topDeviations, missingRecurring, recurringTotal, recurringPaid, savingsRate, vastMonthly, varMonthly };
+    return { monthRows, vitals, currentMonth, existingHashes, accountBalance, forecast, bankBalanceCents, saldoGaps, chainOpening, freqAlerts, topDeviations, missingRecurring, recurringTotal, recurringPaid, savingsRate, vastMonthly, varMonthly };
   }, [budgets, year, categories, transactions, pots, catById, openingBalanceCents]);
 
   const prevYear = years.find((y) => y.jaartal === year.jaartal - 1) || null;
@@ -3460,6 +3548,15 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     });
   };
   const acceptSluitpost = (cents) => { setState((s) => ({ ...s, years: s.years.map((y) => (y.id === s.activeYearId ? { ...y, sluitpostAcceptedCents: cents } : y)) })); logAction("sluitpost geaccepteerd"); };
+  const linkSavingsCode = (categoryId, code) => {
+    const codeUp = String(code).trim().toUpperCase();
+    setState((s) => {
+      const categories = s.categories.map((c) => (c.id === categoryId ? { ...c, spaarcode: codeUp } : c));
+      const transactions = s.transactions.map((t) => { const acc = extractSavingsAccount(t); return (acc && acc.id === codeUp && (t.allocations || []).length <= 1) ? { ...t, allocations: [{ categoryId, amountCents: t.amountCents }] } : t; });
+      return { ...s, categories, transactions };
+    });
+    logAction("spaarcode aan bestaande rekening gekoppeld");
+  };
   const createSavingsAccount = (code, naam) => {
     const codeUp = String(code).trim().toUpperCase();
     setState((s) => {
@@ -3630,9 +3727,9 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
               <b>Let op: je gegevens worden nu in tijdelijk geheugen bewaard en verdwijnen bij een herstart van de server.</b> Koppel in Railway een PostgreSQL-database en zet de variabele <code>DATABASE_URL</code> (Railway doet dit meestal automatisch als je een Postgres-plugin toevoegt). Daarna wordt alles blijvend opgeslagen.
             </div>
           )}
-          {tab === "overzicht" && <Overzicht vitals={derived.vitals} breakEven={derived.breakEven} monthRows={derived.monthRows} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
+          {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthRows={derived.monthRows} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
           {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
-          {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onCreateSavings={createSavingsAccount} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} />}
+          {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} />}
           {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
           {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
           {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
