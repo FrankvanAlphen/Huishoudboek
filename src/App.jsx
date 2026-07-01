@@ -281,6 +281,22 @@ function potFlows(transactions, categories) {
   }
   return flows;
 }
+// Mutatie-overzicht per vermogensrekening (voor de uitklap in het Vermogen-tabblad):
+// elke regel = één transactie die deze rekening raakt, direct geboekt óf afgeleid uit de
+// mededelingen. deltaCents = het effect op de rekening (+ = storting, − = opname).
+function potMutations(transactions, categories) {
+  const map = new Map();
+  const push = (cid, m) => { const a = map.get(cid) || []; a.push(m); map.set(cid, a); };
+  const savingsIds = new Set((categories || []).filter((c) => c.type === "savings").map((c) => c.id));
+  const catName = (id) => { const c = (categories || []).find((x) => x.id === id); return c ? c.naam.split(":")[0] : ""; };
+  for (const t of transactions || []) {
+    for (const a of (t.allocations || [])) if (savingsIds.has(a.categoryId)) push(a.categoryId, { txId: t.id, date: effDate(t), name: t.name || "", deltaCents: -a.amountCents, derived: false, via: "" });
+    const d = derivedPotMutation(t, categories);
+    if (d) { const first = (t.allocations || [])[0]; push(d.categoryId, { txId: t.id, date: effDate(t), name: t.name || "", deltaCents: -d.amountCents, derived: true, via: first ? catName(first.categoryId) : "nog toe te kennen" }); }
+  }
+  for (const a of map.values()) a.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
+  return map;
+}
 function categorize(tx, rules, categories) {
   const sign = tx.amountCents < 0 ? -1 : 1;
   const catById = (id) => (categories || []).find((c) => c.id === id);
@@ -2877,7 +2893,7 @@ function OnbekendeSpaarrekeningen({ transactions, categories, onCreateSavings, o
   return (
     <Card style={{ padding: 14, marginBottom: 14, border: `1px solid ${T.warn}`, background: T.warnSoft }}>
       <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Spaarrekening-mutatie{unknown.length > 1 ? "s" : ""} nog niet gekoppeld</div>
-      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 4 }}>Er gaat geld van of naar een spaarrekening (herkend aan de code in de mededelingen) die nog niet aan een rekening hangt. <b>Koppel de code aan je bestaande rekening</b> — dan herkent de app 'm voortaan vanzelf en boek ik de bijbehorende over-/bijschrijvingen er meteen op, ook die je al ergens anders had gezet. Of maak een nieuwe rekening aan.</div>
+      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 4 }}>Er gaat geld van of naar een spaarrekening (herkend aan de code in de mededelingen) die nog niet aan een rekening hangt. <b>Koppel de code aan je bestaande rekening</b> — het Vermogen-tabblad rekent alle bij- en afschrijvingen met deze code er dan vanzelf aan toe. Je boekingen op posten (bijv. Tussenrekening) blijven gewoon staan. Of maak een nieuwe rekening aan.</div>
       {unknown.map((u) => <UnknownSavingsRow key={u.code} u={u} savingsCats={savingsCats} onCreate={onCreateSavings} onLink={onLinkSavings} />)}
     </Card>
   );
@@ -2982,7 +2998,9 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
 
 function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOpening, onSetSpaarcode, onSetPotTarget }) {
   const potOf = (cid) => pots.find((x) => x.categoryId === cid) || {};
+  const [openId, setOpenId] = useState(null);
   const flows = potFlows(transactions, categories);
+  const mutations = potMutations(transactions, categories);
   const rows = categories.filter((c) => c.type === "savings").map((c) => {
     const f = flows.get(c.id) || { dep: 0, wd: 0, depDerived: 0, wdDerived: 0 };
     const dep = f.dep, wd = f.wd, depDerived = f.depDerived || 0, wdDerived = f.wdDerived || 0;
@@ -3015,6 +3033,7 @@ function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOp
                     {onSetSpaarcode && <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 11, color: T.sub }}>Code/IBAN</span><input value={r.spaarcode} onChange={(e) => onSetSpaarcode(r.categoryId, e.target.value.trim())} placeholder="bijv. H17729888" style={{ ...inputStyle, width: 145, padding: "3px 7px", fontSize: 11, fontFamily: T.mono }} /></span>}
                     {onSetPotTarget && <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 11, color: T.sub }}>Doel</span><MoneyInput cents={r.target} width={100} onChange={(v) => onSetPotTarget(r.categoryId, v)} /></span>}
                     {(r.depDerived > 0 || r.wdDerived > 0) && <span style={{ fontSize: 11, color: T.sub }} title="Overboekingen die op een andere post staan (bijv. Tussenrekening) maar via de code in de mededelingen aan deze rekening zijn toegerekend.">waarvan uit mededelingen: {r.depDerived > 0 ? `+ ${formatEUR(r.depDerived)}` : ""}{r.depDerived > 0 && r.wdDerived > 0 ? " · " : ""}{r.wdDerived > 0 ? `− ${formatEUR(r.wdDerived)}` : ""}</span>}
+                    {(mutations.get(r.categoryId) || []).length > 0 && <button onClick={() => setOpenId(openId === r.categoryId ? null : r.categoryId)} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 11, fontWeight: 600, padding: 0 }}>{openId === r.categoryId ? "▴ mutaties verbergen" : `▾ ${(mutations.get(r.categoryId) || []).length} mutatie${(mutations.get(r.categoryId) || []).length > 1 ? "s" : ""} tonen`}</button>}
                   </div>
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>{onSetPotOpening ? <MoneyInput cents={r.opening} width={120} onChange={(v) => onSetPotOpening(r.categoryId, v)} /> : <Money cents={r.opening} muted />}</div>
@@ -3029,6 +3048,17 @@ function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOp
                     <span style={{ flexShrink: 0 }}>{pct}%</span>
                   </div>
                   <div style={{ height: 7, background: "#eef3f1", borderRadius: 999, overflow: "hidden" }}><div style={{ width: `${pct}%`, height: "100%", background: reached ? T.pos : T.accent }} /></div>
+                </div>
+              )}
+              {openId === r.categoryId && (
+                <div style={{ margin: "0 16px 12px", background: "#f7faf9", border: `1px solid ${T.line}`, borderRadius: 8, padding: "8px 12px" }}>
+                  {(mutations.get(r.categoryId) || []).map((m, j) => (
+                    <div key={j} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, fontSize: 12, padding: "3px 0", borderTop: j ? `1px solid ${T.line}` : "none" }}>
+                      <span style={{ color: T.sub, flexShrink: 0, fontFamily: T.mono }}>{m.date.slice(8, 10)}-{m.date.slice(5, 7)}-{m.date.slice(0, 4)}</span>
+                      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{m.name}{m.derived ? <span style={{ color: T.sub }}> · uit mededelingen{m.via ? ` (staat op: ${m.via})` : ""}</span> : <span style={{ color: T.sub }}> · direct geboekt</span>}</span>
+                      <span style={{ fontFamily: T.mono, fontVariantNumeric: "tabular-nums", flexShrink: 0, color: m.deltaCents >= 0 ? T.pos : T.neg }}>{m.deltaCents >= 0 ? "+ " : "− "}{formatEUR(Math.abs(m.deltaCents))}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -3632,11 +3662,9 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const acceptSluitpost = (cents) => { setState((s) => ({ ...s, years: s.years.map((y) => (y.id === s.activeYearId ? { ...y, sluitpostAcceptedCents: cents } : y)) })); logAction("sluitpost geaccepteerd"); };
   const linkSavingsCode = (categoryId, code) => {
     const codeUp = String(code).trim().toUpperCase();
-    setState((s) => {
-      const categories = s.categories.map((c) => (c.id === categoryId ? { ...c, spaarcode: codeUp } : c));
-      const transactions = s.transactions.map((t) => { const acc = extractSavingsAccount(t); return (acc && acc.id === codeUp && (t.allocations || []).length <= 1) ? { ...t, allocations: [{ categoryId, amountCents: t.amountCents }] } : t; });
-      return { ...s, categories, transactions };
-    });
+    // Alleen de code vastleggen. Bestaande boekingen blijven onaangetast: het Vermogen-tabblad
+    // rekent mutaties met deze code vanzelf (afgeleid) aan de rekening toe.
+    setState((s) => ({ ...s, categories: s.categories.map((c) => (c.id === categoryId ? { ...c, spaarcode: codeUp } : c)) }));
     logAction("spaarcode aan bestaande rekening gekoppeld");
   };
   const createSavingsAccount = (code, naam) => {
@@ -3648,8 +3676,8 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
       while (s.categories.some((c) => c.id === id)) id = base + "-" + i++;
       const nieuw = { id, naam: cleanName, groupId, type: "savings", spaarcode: codeUp, noteSuggested: false };
       const pots = s.pots.some((p) => p.categoryId === id) ? s.pots : [...s.pots, { categoryId: id, opening: 0 }];
-      const transactions = s.transactions.map((t) => { const acc = extractSavingsAccount(t); return (acc && acc.id === codeUp && (t.allocations || []).length <= 1) ? { ...t, allocations: [{ categoryId: id, amountCents: t.amountCents }] } : t; });
-      return { ...s, categories: [...s.categories, nieuw], pots, transactions };
+      // Boekingen blijven onaangetast: mutaties met deze code worden vanaf nu afgeleid toegerekend.
+      return { ...s, categories: [...s.categories, nieuw], pots };
     });
     logAction("spaarrekening aangemaakt en gekoppeld");
   };
