@@ -185,6 +185,9 @@ function matchSpaarcode(tx, categories) {
     const code = String(c.spaarcode || "").trim().toLowerCase();
     if (code && hay.includes(code)) return { categoryId: c.id, ruleId: "spaarcode" };
   }
+  // De code uit de mededelingen matcht de naam van een bestaande spaarrekening (bijv. rekening heet "Spaardeposito X15431287").
+  const acc = extractSavingsAccount(tx);
+  if (acc) { const m = categories.find((c) => c.type === "savings" && String(c.naam || "").toUpperCase().includes(acc.id)); if (m) return { categoryId: m.id, ruleId: "spaarnaam" }; }
   return null;
 }
 // Haal een spaardeposito-/Oranje-spaarrekeningcode uit de mededelingen (bijv. "Oranje spaarrekening M96388351"
@@ -3646,9 +3649,32 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const commitImport = (txns, newRules) => {
     const batchId = "b" + Date.now();
     const importedAt = new Date().toISOString();
-    const tagged = txns.map((t) => ({ ...t, batchId, importedAt }));
-    setState((s) => ({ ...s, transactions: [...s.transactions, ...tagged], rules: newRules && newRules.length ? [...s.rules, ...newRules] : s.rules }));
-    logAction(`${tagged.length} transacties geïmporteerd`);
+    setState((s) => {
+      const savingsGroupId = (s.categories.find((c) => c.type === "savings") || {}).groupId || slug("Sparen & reserveringen");
+      const newCats = [];
+      const usedIds = new Set(s.categories.map((c) => c.id));
+      const codeToNew = {};
+      const tagged = txns.map((t) => {
+        const base = { ...t, batchId, importedAt };
+        if (base.allocations && base.allocations.length > 0) return base;
+        const acc = extractSavingsAccount(t);
+        if (!acc) return base;
+        let catId = codeToNew[acc.id];
+        if (!catId) {
+          const naam = /deposito/i.test(acc.hint || "") ? `Spaardeposito ${acc.id}` : `Oranje spaarrekening ${acc.id}`;
+          let id = slug(naam) || "spaarrekening"; let i = 2;
+          while (usedIds.has(id)) id = slug(naam) + "-" + i++;
+          usedIds.add(id);
+          newCats.push({ id, naam, groupId: savingsGroupId, type: "savings", spaarcode: acc.id, noteSuggested: false });
+          codeToNew[acc.id] = id; catId = id;
+        }
+        base.allocations = [{ categoryId: catId, amountCents: t.amountCents }];
+        return base;
+      });
+      const pots = newCats.reduce((ps, nc) => (ps.some((p) => p.categoryId === nc.id) ? ps : [...ps, { categoryId: nc.id, opening: 0 }]), s.pots || []);
+      return { ...s, categories: [...s.categories, ...newCats], pots, transactions: [...s.transactions, ...tagged], rules: newRules && newRules.length ? [...s.rules, ...newRules] : s.rules };
+    });
+    logAction(`${txns.length} transacties geïmporteerd`);
   };
   const setActiveYear = (id) => setState((s) => ({ ...s, activeYearId: id }));
   const createYear = (jaartal, basis) => {
