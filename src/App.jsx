@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { me, getUsers, login as apiLogin, changePassword as apiChangePassword, logout as apiLogout, getState, putState, getActivity, logAction } from "./api.js";
+import { me, getUsers, login as apiLogin, changePassword as apiChangePassword, logout as apiLogout, getState, putState, getActivity, logAction, debugLog } from "./api.js";
 import * as XLSX from "xlsx";
 
 /**
@@ -296,6 +296,23 @@ function potMutations(transactions, categories) {
   }
   for (const a of map.values()) a.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
   return map;
+}
+// Bouwt per binnenkomende transactie een leesbare debugregel en stuurt die naar de server-terminal.
+function debugLogImport(txns, categories) {
+  try {
+    const catName = (id) => { const c = (categories || []).find((x) => x.id === id); return c ? c.naam.split(":")[0] : id; };
+    const lines = (txns || []).map((t) => {
+      const bedrag = editEUR(Math.abs(t.amountCents));
+      const richting = t.amountCents < 0 ? "AF" : "BIJ";
+      const post = (t.allocations || []).length ? (t.allocations || []).map((a) => catName(a.categoryId)).join(" + ") : "— (te sorteren)";
+      const d = derivedPotMutation(t, categories);
+      let vermogen = "geen vermogensmutatie";
+      if (d) { const naar = d.amountCents < 0; vermogen = `VERMOGEN: ${catName(d.categoryId)} ${naar ? "+" : "−"}${editEUR(Math.abs(d.amountCents))} (afgeleid uit mededelingen)`; }
+      else { const hit = savingsCatForTx(t, categories); if (hit && hit.unlinkedCode) vermogen = `spaarcode ${hit.unlinkedCode} in mededelingen — nog niet gekoppeld, GEEN vermogensmutatie`; }
+      return `${effDate(t)} | ${richting} €${bedrag} | ${t.name || "?"} | post: ${post} | ${vermogen} | med: "${(t.description || "").slice(0, 80)}"`;
+    });
+    debugLog(`import ${lines.length} transactie(s)`, lines);
+  } catch {}
 }
 function categorize(tx, rules, categories) {
   const sign = tx.amountCents < 0 ? -1 : 1;
@@ -3756,30 +3773,15 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const commitImport = (txns, newRules) => {
     const batchId = "b" + Date.now();
     const importedAt = new Date().toISOString();
+    // Debug: log elke binnenkomende transactie naar de server-terminal (Railway-logs),
+    // inclusief wat de vermogens-afleiding ervan maakt.
+    debugLogImport(txns, state.categories);
     setState((s) => {
-      const savingsGroupId = (s.categories.find((c) => c.type === "savings") || {}).groupId || slug("Sparen & reserveringen");
-      const newCats = [];
-      const usedIds = new Set(s.categories.map((c) => c.id));
-      const codeToNew = {};
-      const tagged = txns.map((t) => {
-        const base = { ...t, batchId, importedAt };
-        if (base.allocations && base.allocations.length > 0) return base;
-        const acc = extractSavingsAccount(t);
-        if (!acc) return base;
-        let catId = codeToNew[acc.id];
-        if (!catId) {
-          const naam = /deposito/i.test(acc.hint || "") ? `Spaardeposito ${acc.id}` : `Oranje spaarrekening ${acc.id}`;
-          let id = slug(naam) || "spaarrekening"; let i = 2;
-          while (usedIds.has(id)) id = slug(naam) + "-" + i++;
-          usedIds.add(id);
-          newCats.push({ id, naam, groupId: savingsGroupId, type: "savings", spaarcode: acc.id, noteSuggested: false });
-          codeToNew[acc.id] = id; catId = id;
-        }
-        base.allocations = [{ categoryId: catId, amountCents: t.amountCents }];
-        return base;
-      });
-      const pots = newCats.reduce((ps, nc) => (ps.some((p) => p.categoryId === nc.id) ? ps : [...ps, { categoryId: nc.id, opening: 0 }]), s.pots || []);
-      return { ...s, categories: [...s.categories, ...newCats], pots, transactions: [...s.transactions, ...tagged], rules: newRules && newRules.length ? [...s.rules, ...newRules] : s.rules };
+      const tagged = txns.map((t) => ({ ...t, batchId, importedAt }));
+      // Géén automatische aanmaak van spaarrekeningen meer: transacties zonder passende post
+      // blijven 'te sorteren'. De vermogensmutatie wordt afgeleid uit de mededelingen zodra
+      // de code aan een bestaande rekening is gekoppeld (tabblad Vermogen).
+      return { ...s, transactions: [...s.transactions, ...tagged], rules: newRules && newRules.length ? [...s.rules, ...newRules] : s.rules };
     });
     logAction(`${txns.length} transacties geïmporteerd`);
   };

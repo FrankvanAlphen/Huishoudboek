@@ -21,3 +21,5 @@ export const putState = (state) => call("PUT", "/api/state", { state });
 export const getActivity = () => call("GET", "/api/activity");
 // logboek-actie; faalt stil zodat het de app nooit ophoudt
 export const logAction = (action) => call("POST", "/api/log", { action }).catch(() => {});
+// debug: stuurt regels naar de server-terminal (Railway-logs). Faalt stil.
+export const debugLog = (label, lines) => call("POST", "/api/debug-log", { label, lines }).catch(() => {});

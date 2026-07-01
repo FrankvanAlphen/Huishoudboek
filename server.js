@@ -300,6 +300,18 @@ app.post("/api/log", requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Debug: zet binnenkomende transactieregels in de server-terminal (zichtbaar in de Railway-logs).
+// Puur voor het nalopen van de import/vermogens-afleiding; slaat niets op.
+app.post("/api/debug-log", requireAuth, ah(async (req, res) => {
+  const label = String((req.body && req.body.label) || "debug").slice(0, 120);
+  const lines = Array.isArray(req.body && req.body.lines) ? req.body.lines.slice(0, 500) : [];
+  const who = (req.user && req.user.displayName) || req.username;
+  console.log(`\n===== DEBUG · ${label} · ${who} · ${new Date().toISOString()} =====`);
+  for (const l of lines) console.log("  " + String(l).slice(0, 400));
+  console.log(`===== einde debug (${lines.length} regel(s)) =====\n`);
+  res.json({ ok: true });
+}));
+
 app.get("/api/activity", requireAuth, ah(async (req, res) => res.json({ activity: await getActivity(150) })));
 
 /* ---- Statische frontend + SPA-fallback ---- */
