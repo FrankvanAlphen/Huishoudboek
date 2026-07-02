@@ -299,6 +299,44 @@ function potMutations(transactions, categories) {
   for (const a of map.values()) a.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
   return map;
 }
+// Maandelijks vermogensverloop voor een jaar: per maand het cumulatieve saldo per rekening + totaal.
+// Startpunt = startsaldo (opening) + alle mutaties in eerdere jaren; daarna loopt het saldo per maand
+// op/af met de netto mutatie van die maand. Zo zie je de curve van je vermogen over het jaar.
+function potHistory(transactions, categories, pots, jaartal) {
+  const savings = (categories || []).filter((c) => c.type === "savings");
+  const potOf = (cid) => (pots || []).find((p) => p.categoryId === cid) || {};
+  // Netto mutatie (in cents, + = erbij) per rekening, per maand van dit jaar, plus het saldo vóór dit jaar.
+  const monthly = new Map(); // cid -> number[12]
+  const before = new Map();  // cid -> saldo aan het begin van dit jaar (na eerdere jaren)
+  for (const c of savings) { monthly.set(c.id, Array.from({ length: 12 }, () => 0)); before.set(c.id, potOf(c.id).opening || 0); }
+  const apply = (cid, cents, date) => {
+    if (!monthly.has(cid)) return;
+    const y = Number(String(date).slice(0, 4));
+    const m = Number(String(date).slice(5, 7)) - 1;
+    // effect op de rekening: storting (bankbedrag < 0) = +, opname (bankbedrag > 0) = −
+    const delta = -cents;
+    if (y < jaartal) before.set(cid, before.get(cid) + delta);
+    else if (y === jaartal && m >= 0 && m < 12) monthly.set(cid, Object.assign(monthly.get(cid), { [m]: monthly.get(cid)[m] + delta }));
+  };
+  const savingsIds = new Set(savings.map((c) => c.id));
+  for (const t of transactions || []) {
+    const date = effDate(t);
+    for (const a of (t.allocations || [])) if (savingsIds.has(a.categoryId)) apply(a.categoryId, a.amountCents, date);
+    const d = derivedPotMutation(t, categories);
+    if (d) apply(d.categoryId, d.amountCents, date);
+  }
+  // Cumulatief per rekening + totaal per maand
+  const perAccount = savings.map((c) => {
+    const start = before.get(c.id);
+    const mths = monthly.get(c.id);
+    let run = start;
+    const series = mths.map((v) => (run += v));
+    return { id: c.id, naam: c.naam.split(":")[0], start, series, end: run };
+  });
+  const total = Array.from({ length: 12 }, (_, m) => perAccount.reduce((s, a) => s + a.series[m], 0));
+  const startTotal = perAccount.reduce((s, a) => s + a.start, 0);
+  return { perAccount, total, startTotal, endTotal: total[11] };
+}
 // Bouwt per binnenkomende transactie een leesbare debugregel en stuurt die naar de server-terminal.
 function debugLogImport(txns, categories) {
   try {
@@ -3096,11 +3134,72 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
   );
 }
 
-function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOpening, onSetSpaarcode, onSetPotTarget }) {
+// Maandelijks vermogensverloop als lijngrafiek (custom SVG, geen externe library).
+// Toont het totaal (dik) en per rekening een dunne lijn; kies onder de grafiek wat je toont.
+function VermogenChart({ history, jaartal }) {
+  const [mode, setMode] = useState("total"); // "total" of een rekening-id
+  if (!history || history.perAccount.length === 0) return null;
+  const monthsWithData = history.total.some((v, i) => i > 0 ? history.total[i] !== history.total[i - 1] : v !== history.startTotal) || history.startTotal !== 0;
+  const W = 640, H = 220, padL = 62, padR = 16, padT = 14, padB = 26;
+  const labels = ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+  const series = mode === "total" ? history.total : (history.perAccount.find((a) => a.id === mode) || { series: [] }).series;
+  const startVal = mode === "total" ? history.startTotal : (history.perAccount.find((a) => a.id === mode) || { start: 0 }).start;
+  // 13 punten: startsaldo (x=0) + 12 maandeindes
+  const points = [startVal, ...series];
+  const maxV = Math.max(...points, 1), minV = Math.min(...points, 0);
+  const range = maxV - minV || 1;
+  const x = (i) => padL + (i / 12) * (W - padL - padR);
+  const y = (v) => padT + (1 - (v - minV) / range) * (H - padT - padB);
+  const path = points.map((v, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+  const areaPath = `${path} L ${x(12).toFixed(1)} ${y(minV).toFixed(1)} L ${x(0).toFixed(1)} ${y(minV).toFixed(1)} Z`;
+  // y-as-ticks
+  const ticks = 4;
+  const tickVals = Array.from({ length: ticks + 1 }, (_, i) => minV + (range * i) / ticks);
+  const curName = mode === "total" ? "Totaal vermogen" : (history.perAccount.find((a) => a.id === mode) || {}).naam;
+  const curEnd = points[12];
+  return (
+    <Card style={{ padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+        <div style={{ fontWeight: 700, fontSize: 14 }}>Vermogensverloop {jaartal} <span style={{ fontWeight: 400, color: T.sub, fontSize: 12 }}>· {curName}</span></div>
+        <div style={{ fontSize: 13, color: T.sub }}>eind: <b style={{ color: T.ink }}>{formatEUR(curEnd)}</b> <span style={{ color: curEnd - startVal >= 0 ? T.pos : T.neg }}>({curEnd - startVal >= 0 ? "+" : "−"}{formatEUR(Math.abs(curEnd - startVal))} dit jaar)</span></div>
+      </div>
+      {!monthsWithData ? (
+        <div style={{ fontSize: 12.5, color: T.sub, padding: "20px 0" }}>Nog geen mutaties dit jaar om te tonen.</div>
+      ) : (
+        <>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+            {tickVals.map((tv, i) => (
+              <g key={i}>
+                <line x1={padL} y1={y(tv)} x2={W - padR} y2={y(tv)} stroke={T.line} strokeWidth="1" />
+                <text x={padL - 8} y={y(tv) + 3} textAnchor="end" fontSize="9" fill={T.sub}>{Math.round(tv / 100000) === tv / 100000 ? `€${Math.round(tv / 100000)}k` : `€${(tv / 100).toLocaleString("nl-NL", { maximumFractionDigits: 0 })}`}</text>
+              </g>
+            ))}
+            {minV < 0 && <line x1={padL} y1={y(0)} x2={W - padR} y2={y(0)} stroke="#c9d3d0" strokeWidth="1.5" strokeDasharray="3 3" />}
+            <path d={areaPath} fill={T.accent} opacity="0.08" />
+            <path d={path} fill="none" stroke={T.accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+            {points.map((v, i) => <circle key={i} cx={x(i)} cy={y(v)} r="2.5" fill={T.accent} />)}
+            {["start", ...labels].map((lb, i) => (i === 0 || i % 2 === 1) && <text key={i} x={x(i)} y={H - 8} textAnchor="middle" fontSize="9" fill={T.sub}>{lb}</text>)}
+          </svg>
+          {history.perAccount.length > 1 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+              <button onClick={() => setMode("total")} style={chipStyle(mode === "total")}>Totaal</button>
+              {history.perAccount.map((a) => <button key={a.id} onClick={() => setMode(a.id)} style={chipStyle(mode === a.id)}>{a.naam}</button>)}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+function chipStyle(active) {
+  return { border: `1px solid ${active ? T.accent : T.line}`, background: active ? T.accentSoft : T.panel, color: active ? T.accent : T.sub, borderRadius: 999, padding: "3px 11px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
+}
+function Vermogen({ pots, categories, transactions, year, budgetLines = {}, onSetPotOpening, onSetSpaarcode, onSetPotTarget }) {
   const potOf = (cid) => pots.find((x) => x.categoryId === cid) || {};
   const [openId, setOpenId] = useState(null);
   const flows = potFlows(transactions, categories);
   const mutations = potMutations(transactions, categories);
+  const history = year ? potHistory(transactions, categories, pots, year.jaartal) : null;
   const rows = categories.filter((c) => c.type === "savings").map((c) => {
     const f = flows.get(c.id) || { dep: 0, wd: 0, depDerived: 0, wdDerived: 0 };
     const dep = f.dep, wd = f.wd, depDerived = f.depDerived || 0, wdDerived = f.wdDerived || 0;
@@ -3115,6 +3214,7 @@ function Vermogen({ pots, categories, transactions, budgetLines = {}, onSetPotOp
     <div>
       <SectionTitle>Vermogen · opbouw per rekening</SectionTitle>
       <div style={{ marginBottom: 14 }}><Banner tone="neutral">Per spaar- of reserveringsrekening: het <b>startsaldo</b>, wat er bij/af ging en het huidige saldo. Vul de <b>code of tegenrekening-IBAN</b> in, dan herkent de app stortingen en opnames automatisch — <b>ook als de transactie zelf op een andere post staat</b> (bijv. Tussenrekening): bij "Naar Spaardeposito X…" of "Van Oranje spaarrekening M…" in de mededelingen wordt de juiste rekening vanzelf bij- of afgeboekt. Zet een <b>doel</b> en ik toon de voortgang — met een maandinleg in je begroting ook een prognose.</Banner></div>
+      {history && <VermogenChart history={history} jaartal={year.jaartal} />}
       <Card style={{ overflow: "hidden" }}>
         <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 16px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
           <span>Rekening</span><span style={{ textAlign: "right" }}>Startsaldo</span><span style={{ textAlign: "right" }}>Bij</span><span style={{ textAlign: "right" }}>Af</span><span style={{ textAlign: "right" }}>Huidig saldo</span>
@@ -4079,7 +4179,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, o
           {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
           {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} />}
           {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
-          {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
+          {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} year={year} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
           {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
           {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} history={transactions} onCommit={commitImport} onStartReview={startReview} />}
           {tab === "regels" && <Regels rules={rules} categories={categories} groups={groups} transactions={transactions} onToggle={toggleRule} onDelete={deleteRule} onBulkDelete={bulkDeleteRules} onUpdate={updateRule} onAdd={addRule} onAddDefaults={onAddDefaults} />}
