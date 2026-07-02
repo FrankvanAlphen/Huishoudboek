@@ -112,6 +112,10 @@ async function initDb() {
         updated_by text, updated_at timestamptz NOT NULL DEFAULT now(),
         CONSTRAINT app_state_single CHECK (id = 1))`);
       await pool.query(`ALTER TABLE app_state ADD COLUMN IF NOT EXISTS updated_by text`);
+      await pool.query(`ALTER TABLE app_state ADD COLUMN IF NOT EXISTS rev bigint NOT NULL DEFAULT 0`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS state_snapshots (
+        id bigserial PRIMARY KEY, data jsonb NOT NULL,
+        updated_by text, rev bigint, at timestamptz NOT NULL DEFAULT now())`);
       await pool.query(`CREATE TABLE IF NOT EXISTS users (
         username text PRIMARY KEY, display_name text NOT NULL,
         password_hash text NOT NULL, must_change boolean NOT NULL DEFAULT true,
@@ -169,20 +173,56 @@ async function setUserPassword(username, hash) {
 }
 async function readState() {
   if (dbReady) {
-    const r = await pool.query(`SELECT data, updated_by, updated_at FROM app_state WHERE id = 1`);
-    if (!r.rows[0]) return { state: null };
-    return { state: r.rows[0].data, updatedBy: r.rows[0].updated_by, updatedAt: r.rows[0].updated_at };
+    const r = await pool.query(`SELECT data, updated_by, updated_at, rev FROM app_state WHERE id = 1`);
+    if (!r.rows[0]) return { state: null, rev: 0 };
+    return { state: r.rows[0].data, updatedBy: r.rows[0].updated_by, updatedAt: r.rows[0].updated_at, rev: Number(r.rows[0].rev) || 0 };
   }
-  return memState ? { state: memState.data, updatedBy: memState.updatedBy, updatedAt: memState.updatedAt } : { state: null };
+  return memState ? { state: memState.data, updatedBy: memState.updatedBy, updatedAt: memState.updatedAt, rev: memState.rev || 0 } : { state: null, rev: 0 };
 }
-async function writeState(data, updatedBy) {
-  if (dbReady)
+// Slaat op met optimistische concurrency: alleen als expectedRev overeenkomt met de huidige rev.
+// Bij null expectedRev wordt de check overgeslagen (bijv. eerste seed). Geeft de nieuwe rev terug,
+// of { conflict: true, current } als een ander intussen heeft opgeslagen.
+async function writeState(data, updatedBy, expectedRev) {
+  if (dbReady) {
+    const cur = await pool.query(`SELECT rev FROM app_state WHERE id = 1`);
+    const curRev = cur.rows[0] ? Number(cur.rows[0].rev) || 0 : 0;
+    if (expectedRev != null && cur.rows[0] && curRev !== Number(expectedRev)) {
+      const full = await readState();
+      return { conflict: true, current: full };
+    }
+    const newRev = curRev + 1;
     await pool.query(
-      `INSERT INTO app_state (id, data, updated_by, updated_at) VALUES (1, $1, $2, now())
-       ON CONFLICT (id) DO UPDATE SET data = $1, updated_by = $2, updated_at = now()`,
-      [data, updatedBy]
+      `INSERT INTO app_state (id, data, updated_by, updated_at, rev) VALUES (1, $1, $2, now(), $3)
+       ON CONFLICT (id) DO UPDATE SET data = $1, updated_by = $2, updated_at = now(), rev = $3`,
+      [data, updatedBy, newRev]
     );
-  else memState = { data, updatedBy, updatedAt: new Date().toISOString() };
+    // Snapshot voor herstel; bewaar de laatste 40.
+    try {
+      await pool.query(`INSERT INTO state_snapshots (data, updated_by, rev) VALUES ($1, $2, $3)`, [data, updatedBy, newRev]);
+      await pool.query(`DELETE FROM state_snapshots WHERE id NOT IN (SELECT id FROM state_snapshots ORDER BY id DESC LIMIT 40)`);
+    } catch (e) { console.error("Snapshot mislukt:", e.message); }
+    return { rev: newRev };
+  }
+  const curRev = memState ? (memState.rev || 0) : 0;
+  if (expectedRev != null && memState && curRev !== Number(expectedRev)) {
+    return { conflict: true, current: { state: memState.data, updatedBy: memState.updatedBy, updatedAt: memState.updatedAt, rev: curRev } };
+  }
+  memState = { data, updatedBy, updatedAt: new Date().toISOString(), rev: curRev + 1 };
+  return { rev: curRev + 1 };
+}
+async function listSnapshots(limit) {
+  if (dbReady) {
+    const r = await pool.query(`SELECT id, updated_by, rev, at FROM state_snapshots ORDER BY id DESC LIMIT $1`, [limit]);
+    return r.rows.map((x) => ({ id: x.id, updatedBy: x.updated_by, rev: Number(x.rev), at: x.at }));
+  }
+  return [];
+}
+async function readSnapshot(id) {
+  if (dbReady) {
+    const r = await pool.query(`SELECT data FROM state_snapshots WHERE id = $1`, [id]);
+    return r.rows[0] ? r.rows[0].data : null;
+  }
+  return null;
 }
 async function addLog(username, displayName, action) {
   if (dbReady) await pool.query(`INSERT INTO audit_log (username, display_name, action) VALUES ($1, $2, $3)`, [username, displayName, action]);
@@ -273,25 +313,41 @@ app.post("/api/logout", ah(async (req, res) => {
 app.get("/api/state", requireAuth, ah(async (req, res) => {
   try {
     const r = await readState();
-    res.json({ state: r.state == null ? null : r.state, updatedBy: r.updatedBy || null, updatedAt: r.updatedAt || null, db: dbReady });
+    res.json({ state: r.state == null ? null : r.state, updatedBy: r.updatedBy || null, updatedAt: r.updatedAt || null, rev: r.rev || 0, db: dbReady });
   } catch (e) {
     console.error("State lezen mislukt:", e.message);
-    res.json({ state: memState ? memState.data : null, db: dbReady });
+    res.json({ state: memState ? memState.data : null, rev: memState ? memState.rev || 0 : 0, db: dbReady });
   }
 }));
 
 app.put("/api/state", requireAuth, ah(async (req, res) => {
   const data = req.body && req.body.state;
   if (data == null) return res.status(400).json({ error: "geen toestand meegegeven" });
+  const expectedRev = req.body && req.body.rev != null ? Number(req.body.rev) : null;
   const by = (req.user && req.user.displayName) || req.username;
   try {
-    await writeState(data, by);
-    res.json({ ok: true, db: dbReady, updatedBy: by });
+    const result = await writeState(data, by, expectedRev);
+    if (result && result.conflict) {
+      // Iemand anders (ander apparaat/gebruiker) heeft intussen opgeslagen.
+      return res.status(409).json({ conflict: true, current: result.current, db: dbReady });
+    }
+    res.json({ ok: true, db: dbReady, updatedBy: by, rev: result ? result.rev : undefined });
   } catch (e) {
     console.error("State opslaan mislukt:", e.message);
-    memState = { data, updatedBy: by, updatedAt: new Date().toISOString() };
-    res.json({ ok: true, db: false, updatedBy: by });
+    memState = { data, updatedBy: by, updatedAt: new Date().toISOString(), rev: (memState ? memState.rev || 0 : 0) + 1 };
+    res.json({ ok: true, db: false, updatedBy: by, rev: memState.rev });
   }
+}));
+
+// Lijst van herstelpunten (snapshots).
+app.get("/api/snapshots", requireAuth, ah(async (req, res) => {
+  try { res.json({ snapshots: await listSnapshots(40), db: dbReady }); }
+  catch (e) { console.error("Snapshots lezen mislukt:", e.message); res.json({ snapshots: [], db: dbReady }); }
+}));
+// Eén snapshot ophalen om te herstellen (client zet 'm daarna via PUT terug).
+app.get("/api/snapshots/:id", requireAuth, ah(async (req, res) => {
+  try { const data = await readSnapshot(Number(req.params.id)); if (data == null) return res.status(404).json({ error: "niet gevonden" }); res.json({ state: data }); }
+  catch (e) { console.error("Snapshot lezen mislukt:", e.message); res.status(500).json({ error: "fout" }); }
 }));
 
 app.post("/api/log", requireAuth, ah(async (req, res) => {

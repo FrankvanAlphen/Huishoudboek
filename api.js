@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { me, getUsers, login as apiLogin, changePassword as apiChangePassword, logout as apiLogout, getState, putState, getActivity, logAction, debugLog } from "./api.js";
-import * as XLSX from "xlsx";
+import { me, getUsers, login as apiLogin, changePassword as apiChangePassword, logout as apiLogout, getState, putState, getActivity, logAction, debugLog, getSnapshots, getSnapshot } from "./api.js";
+// xlsx wordt alleen geladen wanneer je écht een Excel-bestand kiest (scheelt ~450 kB bij het opstarten).
+let _xlsxPromise = null;
+const loadXLSX = () => (_xlsxPromise = _xlsxPromise || import("xlsx"));
 
 /**
  * Huishoudboekje — testprototype (fase 2 + 3) in één React-bestand.
@@ -858,6 +860,16 @@ function buildSeed() {
 }
 
 /* ----------------------------------------------------------- UI-bouwstenen */
+// Detecteer een smal (telefoon)scherm, zodat de layout zich kan aanpassen.
+function useIsMobile(bp = 760) {
+  const [m, setM] = useState(typeof window !== "undefined" ? window.innerWidth < bp : false);
+  useEffect(() => {
+    const on = () => setM(window.innerWidth < bp);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, [bp]);
+  return m;
+}
 const Icon = ({ d, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{d}</svg>
 );
@@ -1106,7 +1118,7 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 /* PAGINA'S                                                              */
 /* ===================================================================== */
 
-function Overzicht({ vitals, monthRows, currentMonth, jaar, openActions, forecast, openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
+function Overzicht({ vitals, monthRows, currentMonth, jaar, openActions, forecast, forecastYear = null, reconciliation = null, agingAdvances = [], openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
   const [reopen, setReopen] = useState(false);
   const tile = (label, node, sub, onClick) => (
     <Card onClick={onClick} style={{ padding: 18, flex: 1, minWidth: 190, cursor: onClick ? "pointer" : "default" }}>
@@ -1207,6 +1219,59 @@ function Overzicht({ vitals, monthRows, currentMonth, jaar, openActions, forecas
         {tile("Gereserveerd vermogen", <Money cents={vitals.vermogen} bold />, `${vitals.potCount} rekeningen · bekijk opbouw`, () => onGoto && onGoto("vermogen"))}
         {savingsRate && tile("Besparingsratio deze maand", <span style={{ color: savingsRate.rate == null ? T.ink : savingsRate.rate >= 0 ? T.pos : T.neg }}>{savingsRate.rate != null ? `${Math.round(savingsRate.rate * 100)}%` : "—"}</span>, savingsRate.rate != null ? `${formatEUR(savingsRate.saved)} opzij van ${formatEUR(savingsRate.income)}` : "nog geen inkomsten deze maand")}
       </div>
+
+      {forecastYear && (
+        <Card style={{ padding: 16, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8, marginBottom: forecastYear.budgetRunout.length ? 10 : 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Prognose jaareinde {jaar} <span style={{ fontWeight: 400, color: T.sub, fontSize: 12 }}>· op basis van je begroting + tempo tot nu toe</span></div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: forecastYear.projectedYearEnd >= 0 ? T.pos : T.neg }}>≈ <Money cents={forecastYear.projectedYearEnd} sign bold size={16} /></div>
+          </div>
+          <div style={{ fontSize: 12, color: T.sub }}>Beginsaldo {formatEUR(forecastYear.carryIn)} + werkelijk t/m nu {forecastYear.actualNetYTD >= 0 ? "+" : "−"}{formatEUR(Math.abs(forecastYear.actualNetYTD))} + begroot restant {forecastYear.budgetNetRest >= 0 ? "+" : "−"}{formatEUR(Math.abs(forecastYear.budgetNetRest))}{Math.abs(forecastYear.bias) > 50 ? `, met correctie voor je maandpatroon (${forecastYear.bias >= 0 ? "+" : "−"}${formatEUR(Math.abs(Math.round(forecastYear.bias)))}/mnd)` : ""}.</div>
+          {forecastYear.budgetRunout.length > 0 && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.line}` }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.sub, marginBottom: 6 }}>Op dit tempo raakt het jaarbudget eerder op:</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {forecastYear.budgetRunout.map((b) => (
+                  <div key={b.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.naam}</span>
+                    <span style={{ flexShrink: 0, color: b.runoutMonth <= currentMonth + 1 ? T.neg : "#9a6a14" }}>{b.pace}% van jaarbudget/tempo · op rond {["", "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"][Math.min(12, b.runoutMonth)]}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {reconciliation && (
+        <Card style={{ padding: "12px 16px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", border: `1px solid ${reconciliation.gaps ? "#f0dcb8" : "#cfe6d4"}`, background: reconciliation.gaps ? T.warnSoft : "#f2f9f4" }}>
+          <div style={{ fontSize: 13 }}>
+            {reconciliation.gaps > 0
+              ? <><b style={{ color: "#9a6a14" }}>Saldoketen heeft {reconciliation.gaps} onderbreking{reconciliation.gaps > 1 ? "en" : ""}</b> — er lijken transacties te ontbreken. Controleer je import.</>
+              : reconciliation.through > 0
+                ? <><b style={{ color: "#1f6b3a" }}>✓ Administratie sluit t/m {["", "januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"][reconciliation.through]}</b> — banksaldo en boekingen lopen gelijk.</>
+                : <>Nog geen sluitende maand om af te letteren.</>}
+          </div>
+          <Btn size="sm" variant="secondary" onClick={() => onGoto && onGoto("transacties")}>Transacties</Btn>
+        </Card>
+      )}
+
+      {agingAdvances.length > 0 && (
+        <Card style={{ padding: 16, marginBottom: 16, border: `1px solid ${agingAdvances.some((a) => a.days >= 30) ? "#f0dcb8" : T.line}`, background: agingAdvances.some((a) => a.days >= 30) ? T.warnSoft : T.panel }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: agingAdvances.some((a) => a.days >= 30) ? "#9a6a14" : T.ink }}>Openstaande voorschotten · {agingAdvances.length}</div>
+            <Btn size="sm" variant="secondary" onClick={() => onGoto && onGoto("transacties")}>Afhandelen</Btn>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {agingAdvances.slice(0, 6).map((a) => (
+              <div key={a.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+                <span style={{ flexShrink: 0 }}><b>{formatEUR(a.remaining)}</b> open · <span style={{ color: a.days >= 30 ? T.neg : T.sub }}>{a.days} dag{a.days === 1 ? "" : "en"}</span></span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {(vastMonthly > 0 || varMonthly > 0) && (() => {
         const totM = vastMonthly + varMonthly;
@@ -1484,6 +1549,7 @@ function Begroting({ groups, categories, budgets, year, onSaveLine, onImportBudg
     try {
       let rows;
       if (/\.xlsx?$/i.test(file.name)) {
+        const XLSX = await loadXLSX();
         const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
         const ws = wb.Sheets[wb.SheetNames[0]];
         rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
@@ -2447,6 +2513,7 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
     if (!file) return;
     try {
       if (/\.xlsx?$/i.test(file.name) || /\.xls$/i.test(file.name)) {
+        const XLSX = await loadXLSX();
         const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
@@ -2616,7 +2683,7 @@ function SplitEditor({ tx, categories, groups, onSave, onCancel }) {
 }
 
 const TX_COLS = "78px 1fr 96px 200px 40px 34px";
-function TxRow({ tx, groups, categories, rules = [], history = [], years = [], newBatchId = null, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne }) {
+function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [], newBatchId = null, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne }) {
   const [open, setOpen] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const sign = tx.amountCents < 0 ? -1 : 1;
@@ -2719,6 +2786,11 @@ function TxRow({ tx, groups, categories, rules = [], history = [], years = [], n
     </div>
   );
 }
+// Alleen opnieuw renderen als de transactie zelf of relevante lijsten wijzigen — scheelt veel werk
+// bij lange transactielijsten.
+const TxRow = React.memo(TxRowBase, (a, b) =>
+  a.tx === b.tx && a.categories === b.categories && a.rules === b.rules && a.years === b.years && a.newBatchId === b.newBatchId && a.groups === b.groups && a.history === b.history
+);
 
 function DataCleanup({ year, years = [], txCount, onClearRange, onClearYear, onClearAll, onResetAll }) {
   const months = ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -2943,6 +3015,10 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
     if (q) { const hay = (t.name + " " + (t.description || "") + " " + (t.note || "")).toLowerCase(); if (!hay.includes(q.toLowerCase())) return false; }
     return true;
   });
+  const PAGE = 100;
+  const [limit, setLimit] = useState(PAGE);
+  useEffect(() => { setLimit(PAGE); }, [batchFilter, maand, status, q, year]);
+  const visible = shown.slice(0, limit);
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -3003,8 +3079,15 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
             <span>Datum</span><span>Omschrijving</span><span style={{ textAlign: "right" }}>Bedrag</span><span>Post</span><span style={{ textAlign: "center" }}>Mark</span><span />
           </div>
           <datalist id="bundel-labels">{bundleLabels(transactions).map((b) => <option key={b} value={b} />)}</datalist>
-          {shown.map((t) => <TxRow key={t.id} tx={t} groups={groups} categories={categories} rules={rules} history={transactions} years={years} newBatchId={newestUnreviewed ? newestUnreviewed.id : null} onSetAllocations={onSetAllocations} onSetNote={onSetNote} onToggleFlag={onToggleFlag} onAddRule={onAddRule} onSaveOne={onSaveOne} />)}
+          {visible.map((t) => <TxRow key={t.id} tx={t} groups={groups} categories={categories} rules={rules} history={transactions} years={years} newBatchId={newestUnreviewed ? newestUnreviewed.id : null} onSetAllocations={onSetAllocations} onSetNote={onSetNote} onToggleFlag={onToggleFlag} onAddRule={onAddRule} onSaveOne={onSaveOne} />)}
           {shown.length === 0 && <div style={{ padding: 16, fontSize: 13, color: T.sub }}>Geen transacties met dit filter.</div>}
+          {shown.length > visible.length && (
+            <div style={{ padding: "12px 14px", borderTop: `1px solid ${T.line}`, display: "flex", justifyContent: "center", gap: 12, alignItems: "center" }}>
+              <span style={{ fontSize: 12.5, color: T.sub }}>{visible.length} van {shown.length} getoond</span>
+              <Btn size="sm" variant="secondary" onClick={() => setLimit((l) => l + PAGE)}>Toon {Math.min(PAGE, shown.length - visible.length)} meer</Btn>
+              {shown.length - visible.length > PAGE && <Btn size="sm" variant="ghost" onClick={() => setLimit(shown.length)}>Toon alles</Btn>}
+            </div>
+          )}
         </Card>
       )}
       </>
@@ -3388,6 +3471,41 @@ function mergeSeed(state) {
 }
 
 /* ----------------------------------------------------------- Activiteit */
+function DataBackup({ dbReady, onExport, onImport, onRestoreSnapshot }) {
+  const fileRef = useRef(null);
+  const [snaps, setSnaps] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const loadSnaps = () => { setBusy(true); getSnapshots().then((r) => setSnaps(r.snapshots || [])).catch(() => setSnaps([])).finally(() => setBusy(false)); };
+  const restore = async (id) => {
+    if (!confirm("Deze versie terugzetten? De huidige gegevens worden vervangen (je kunt daarna weer een eerdere versie kiezen).")) return;
+    try { const r = await getSnapshot(id); if (r && r.state && onRestoreSnapshot) onRestoreSnapshot(r.state); } catch { alert("Kon deze versie niet ophalen."); }
+  };
+  return (
+    <Card style={{ padding: 18, marginBottom: 18 }}>
+      <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Gegevens &amp; backup</div>
+      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 12 }}>Download af en toe een backup als extra zekerheid naast de database. Een backup bevat je volledige huishoudboekje (begroting, transacties, regels, vermogen) en kun je later weer terugzetten.</div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <Btn size="sm" onClick={onExport}>⬇ Backup downloaden</Btn>
+        <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={(e) => { onImport(e.target.files[0]); e.target.value = ""; }} />
+        <Btn size="sm" variant="secondary" onClick={() => fileRef.current && fileRef.current.click()}>⬆ Backup terugzetten</Btn>
+        {dbReady && <Btn size="sm" variant="ghost" onClick={loadSnaps}>{snaps == null ? "Herstelpunten tonen" : "Vernieuwen"}</Btn>}
+      </div>
+      {dbReady && snaps != null && (
+        <div style={{ marginTop: 14, borderTop: `1px solid ${T.line}`, paddingTop: 12 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: T.sub, marginBottom: 6 }}>Automatische herstelpunten <span style={{ fontWeight: 400 }}>· de laatste 40 opgeslagen versies</span></div>
+          {busy && <div style={{ fontSize: 12.5, color: T.sub }}>Laden…</div>}
+          {!busy && snaps.length === 0 && <div style={{ fontSize: 12.5, color: T.sub }}>Nog geen herstelpunten.</div>}
+          {!busy && snaps.map((s) => (
+            <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 12.5, padding: "5px 0", borderTop: `1px solid ${T.line}` }}>
+              <span>{fmtWhen(s.at)} <span style={{ color: T.sub }}>· {s.updatedBy || "onbekend"} · v{s.rev}</span></span>
+              <Btn size="sm" variant="secondary" onClick={() => restore(s.id)}>Terugzetten</Btn>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
 function Activiteit() {
   const [items, setItems] = useState(null);
   useEffect(() => {
@@ -3489,7 +3607,7 @@ function LoginScreen({ onSuccess }) {
 }
 
 /* ----------------------------------------------------------- Werkruimte */
-function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
+function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, onTakeServer, onKeepMine, onRestore }) {
   const { groups, categories, years, activeYearId, budgets, pots, rules, transactions } = state;
   const openingBalanceCents = state.openingBalanceCents ?? null;
   const reviewedBatches = state.reviewedBatches || [];
@@ -3497,6 +3615,8 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   const [tab, setTab] = useState("overzicht");
   const [showChangePw, setShowChangePw] = useState(false);
   const [showNewYear, setShowNewYear] = useState(false);
+  const isMobile = useIsMobile();
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const year = years.find((y) => y.id === activeYearId) || years[0];
   const catById = useCallback((id) => categories.find((c) => c.id === id), [categories]);
@@ -3585,7 +3705,53 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
       if (c.vast) vastMonthly += line.average; else varMonthly += line.average;
     }
 
-    return { monthRows, vitals, currentMonth, existingHashes, accountBalance, forecast, bankBalanceCents, saldoGaps, chainOpening, freqAlerts, topDeviations, missingRecurring, recurringTotal, recurringPaid, savingsRate, vastMonthly, varMonthly };
+    // ---- Jaareinde-prognose ----
+    // Werkelijk netto t/m huidige maand + begroot netto voor de resterende maanden,
+    // gecorrigeerd met het gemiddelde afwijkingspatroon per maand tot nu toe.
+    const actualNetYTD = actuals.slice(0, currentMonth).reduce((s, a) => s + a.income - a.expense, 0);
+    const budgetNetYTD = budgetNet.slice(0, currentMonth).reduce((s, v) => s + v, 0);
+    const budgetNetRest = budgetNet.slice(currentMonth).reduce((s, v) => s + v, 0);
+    const ytdBias = currentMonth > 0 ? (actualNetYTD - budgetNetYTD) / currentMonth : 0; // gem. afwijking/maand
+    const monthsRest = 12 - currentMonth;
+    const projectedYearEnd = year.carryInCents + actualNetYTD + budgetNetRest + Math.round(ytdBias * monthsRest);
+    // Per post: op dit tempo raakt het jaarbudget eerder op?
+    const budgetRunout = [];
+    for (const c of categories) {
+      if (c.type !== "expense") continue;
+      const line = lines[c.id]; if (!line) continue;
+      const yearBudget = sumMonths(line.months);
+      if (yearBudget <= 0) continue;
+      let spent = 0;
+      for (const t of yearTx) { if (effMonth(t) > currentMonth) continue; for (const a of t.allocations) if (a.categoryId === c.id) spent += -a.amountCents; }
+      const perMonth = currentMonth > 0 ? spent / currentMonth : 0;
+      if (perMonth <= 0) continue;
+      const monthsToRunout = yearBudget / perMonth;
+      if (monthsToRunout < 12 && spent > 0) budgetRunout.push({ id: c.id, naam: c.naam.split(":")[0], spent, yearBudget, runoutMonth: Math.ceil(monthsToRunout), pace: Math.round((perMonth * 12 / yearBudget) * 100) });
+    }
+    budgetRunout.sort((a, b) => a.runoutMonth - b.runoutMonth);
+    const forecastYear = { projectedYearEnd, carryIn: year.carryInCents, actualNetYTD, budgetNetRest, bias: ytdBias, monthsRest, budgetRunout: budgetRunout.slice(0, 6) };
+
+    // ---- Maandafletter-status ----
+    // Per maand: is er banksaldo-informatie én sluit de saldoketen? "Kloppend t/m maand X".
+    const monthsWithData = new Set(yearTx.map((t) => effMonth(t)));
+    let reconciledThrough = 0;
+    for (let m = 1; m <= currentMonth; m++) { if (monthsWithData.has(m)) reconciledThrough = m; else break; }
+    const reconciliation = { through: saldoGaps === 0 ? reconciledThrough : 0, gaps: saldoGaps, currentMonth };
+
+    // ---- Voorschot-ouderdom (tikkies die te lang openstaan) ----
+    const today = new Date();
+    const agingAdvances = [];
+    for (const t of transactions) {
+      if (!t.advance) continue;
+      const remaining = remainingOf(t, transactions);
+      if (remaining <= 0) continue;
+      const d = new Date(effDate(t));
+      const days = isNaN(d) ? 0 : Math.floor((today - d) / 86400000);
+      agingAdvances.push({ id: t.id, name: t.name || "voorschot", date: effDate(t), remaining, days });
+    }
+    agingAdvances.sort((a, b) => b.days - a.days);
+
+    return { monthRows, vitals, currentMonth, existingHashes, accountBalance, forecast, forecastYear, reconciliation, agingAdvances, bankBalanceCents, saldoGaps, chainOpening, freqAlerts, topDeviations, missingRecurring, recurringTotal, recurringPaid, savingsRate, vastMonthly, varMonthly };
   }, [budgets, year, categories, transactions, pots, catById, openingBalanceCents]);
 
   const prevYear = years.find((y) => y.jaartal === year.jaartal - 1) || null;
@@ -3786,6 +3952,31 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
     logAction(`${txns.length} transacties geïmporteerd`);
   };
   const setActiveYear = (id) => setState((s) => ({ ...s, activeYearId: id }));
+  // ---- Backup: download de volledige toestand als JSON ----
+  const exportBackup = () => {
+    try {
+      const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const d = new Date();
+      const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
+      a.href = url; a.download = `huishoudboekje-backup-${stamp}.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      logAction("backup gedownload");
+    } catch {}
+  };
+  // ---- Herstel uit een geüpload backup-bestand ----
+  const importBackup = async (file) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!parsed || !Array.isArray(parsed.categories) || !Array.isArray(parsed.years)) { alert("Dit lijkt geen geldig backup-bestand van het huishoudboekje."); return; }
+      if (!confirm("Weet je het zeker? De huidige gegevens worden vervangen door de inhoud van dit backup-bestand.")) return;
+      if (onRestore) onRestore(parsed);
+      logAction("backup teruggezet");
+    } catch { alert("Kon het bestand niet lezen — is het een geldig .json backup-bestand?"); }
+  };
   const createYear = (jaartal, basis) => {
     const id = String(jaartal);
     if (years.some((y) => y.id === id)) { setActiveYear(id); setShowNewYear(false); setTab("begroting"); return; }
@@ -3816,21 +4007,32 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
   ];
   const teSorterenBadge = transactions.reduce((n, t) => n + (effYear(t) === year.jaartal && (!t.allocations || t.allocations.length === 0) ? 1 : 0), 0);
 
+  const asideStyle = isMobile
+    ? { width: 240, background: T.panel, borderRight: `1px solid ${T.line}`, padding: "20px 14px", position: "fixed", top: 0, left: 0, height: "100vh", boxSizing: "border-box", zIndex: 41, transform: menuOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease", boxShadow: menuOpen ? "2px 0 16px rgba(0,0,0,0.15)" : "none" }
+    : { width: 220, background: T.panel, borderRight: `1px solid ${T.line}`, flexShrink: 0, padding: "20px 14px", position: "sticky", top: 0, height: "100vh", boxSizing: "border-box" };
+  const footerStyle = { position: isMobile ? "static" : "absolute", bottom: 16, left: 14, right: 14, marginTop: isMobile ? 20 : 0 };
+  const vitalTiles = [
+    { label: "Lopend saldo", node: <Money cents={derived.vitals.saldo} sign bold size={18} /> },
+    { label: "Afwijking begroting", node: <Money cents={derived.vitals.deviation} sign bold size={18} /> },
+    { label: "Vermogen", node: <Money cents={derived.vitals.vermogen} bold size={18} /> },
+  ];
+
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: T.bg, color: T.ink, fontFamily: T.sans }}>
-      <aside style={{ width: 220, background: T.panel, borderRight: `1px solid ${T.line}`, flexShrink: 0, padding: "20px 14px", position: "sticky", top: 0, height: "100vh", boxSizing: "border-box" }}>
+      {isMobile && menuOpen && <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 40 }} />}
+      <aside style={asideStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px 18px" }}>
           <div style={{ width: 30, height: 30, borderRadius: 8, background: T.accent, display: "grid", placeItems: "center", color: "#fff", fontWeight: 800 }}>€</div>
           <div style={{ fontWeight: 700, fontSize: 15 }}>Huishoudboekje</div>
         </div>
         {nav.map(([id, label, icon]) => (
-          <button key={id} onClick={() => setTab(id)} style={{ display: "flex", alignItems: "center", gap: 11, width: "100%", textAlign: "left", border: "none", cursor: "pointer", padding: "9px 10px", borderRadius: 8, marginBottom: 2, fontSize: 14, fontWeight: 600, background: tab === id ? T.accentSoft : "transparent", color: tab === id ? T.accent : T.sub }}>
+          <button key={id} onClick={() => { setTab(id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 11, width: "100%", textAlign: "left", border: "none", cursor: "pointer", padding: "9px 10px", borderRadius: 8, marginBottom: 2, fontSize: 14, fontWeight: 600, background: tab === id ? T.accentSoft : "transparent", color: tab === id ? T.accent : T.sub }}>
             <span style={{ color: tab === id ? T.accent : "#9aa8a5", display: "flex" }}><Icon d={icon} /></span>
             <span style={{ flex: 1 }}>{label}</span>
             {id === "transacties" && teSorterenBadge > 0 && <span style={{ fontSize: 11, fontWeight: 700, minWidth: 18, textAlign: "center", padding: "1px 6px", borderRadius: 999, background: T.warn, color: "#fff" }}>{teSorterenBadge}</span>}
           </button>
         ))}
-        <div style={{ position: "absolute", bottom: 16, left: 14, right: 14 }}>
+        <div style={footerStyle}>
           <div style={{ fontSize: 12, color: T.ink, fontWeight: 600, marginBottom: 8 }}>Ingelogd als {user.displayName}</div>
           <button onClick={() => setShowChangePw(true)} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Wachtwoord wijzigen</button>
           <button onClick={onLogout} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600 }}>Uitloggen</button>
@@ -3842,27 +4044,38 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
       </aside>
 
       <main style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", borderBottom: `1px solid ${T.line}`, background: T.panel, position: "sticky", top: 0, zIndex: 5 }}>
-          {[["Lopend saldo", <Money key="s" cents={derived.vitals.saldo} sign bold size={18} />],
-            ["Afwijking begroting", <Money key="d" cents={derived.vitals.deviation} sign bold size={18} />],
-            ["Vermogen", <Money key="v" cents={derived.vitals.vermogen} bold size={18} />]].map(([label, node], i) => (
-            <div key={i} style={{ padding: "12px 22px", borderRight: i < 2 ? `1px solid ${T.line}` : "none" }}>
-              <div style={{ fontSize: 11, color: T.sub, marginBottom: 2 }}>{label}</div>{node}
+        {isMobile && (
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderBottom: `1px solid ${T.line}`, background: T.panel, position: "sticky", top: 0, zIndex: 6 }}>
+            <button onClick={() => setMenuOpen(true)} aria-label="menu" style={{ border: "none", background: "transparent", cursor: "pointer", color: T.ink, display: "flex", padding: 4 }}><Icon d={<><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></>} size={22} /></button>
+            <div style={{ fontWeight: 700, fontSize: 15, textTransform: "capitalize" }}>{(nav.find((n) => n[0] === tab) || [null, "Overzicht"])[1]}</div>
+            <div style={{ marginLeft: "auto" }}><YearSwitcher years={years} activeYearId={activeYearId} onSelect={setActiveYear} onNew={() => setShowNewYear(true)} /></div>
+          </div>
+        )}
+        <div style={{ display: "flex", borderBottom: `1px solid ${T.line}`, background: T.panel, position: "sticky", top: isMobile ? 47 : 0, zIndex: 5, overflowX: "auto" }}>
+          {vitalTiles.map((t, i) => (
+            <div key={i} style={{ padding: "12px 22px", borderRight: i !== 2 ? `1px solid ${T.line}` : "none", flexShrink: 0 }}>
+              <div style={{ fontSize: 11, color: T.sub, marginBottom: 2 }}>{t.label}</div>{t.node}
             </div>
           ))}
-          <div style={{ marginLeft: "auto", padding: "10px 18px", alignSelf: "center", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-            <YearSwitcher years={years} activeYearId={activeYearId} onSelect={setActiveYear} onNew={() => setShowNewYear(true)} />
-            {meta && meta.updatedBy && <div style={{ fontSize: 11, color: T.sub }}>laatst bijgewerkt door {meta.updatedBy}</div>}
-          </div>
+          {!isMobile && (
+            <div style={{ marginLeft: "auto", padding: "10px 18px", alignSelf: "center", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+              <YearSwitcher years={years} activeYearId={activeYearId} onSelect={setActiveYear} onNew={() => setShowNewYear(true)} />
+              {meta && meta.updatedBy && <div style={{ fontSize: 11, color: T.sub }}>laatst bijgewerkt door {meta.updatedBy}</div>}
+            </div>
+          )}
         </div>
 
-        <div style={{ padding: "24px 28px", maxWidth: 1080 }}>
+        <div style={{ padding: isMobile ? "16px 14px" : "24px 28px", maxWidth: 1080 }}>
+          {conflict && (
+            <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 9, background: "#fdeaea", border: "1px solid #f0c2c2", color: "#8a2b2b", fontSize: 13, lineHeight: 1.5 }}>
+              <b>Iemand anders heeft intussen wijzigingen opgeslagen.</b> Waarschijnlijk {meta && meta.updatedBy ? meta.updatedBy : "een ander apparaat"}. Om te voorkomen dat je elkaars werk overschrijft, kies je: <span style={{ display: "inline-flex", gap: 8, marginTop: 8 }}><button onClick={onTakeServer} style={{ border: "1px solid #f0c2c2", background: "#fff", color: "#8a2b2b", borderRadius: 7, padding: "5px 11px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Hun versie laden</button><button onClick={onKeepMine} style={{ border: "1px solid #f0c2c2", background: "#8a2b2b", color: "#fff", borderRadius: 7, padding: "5px 11px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Mijn versie behouden</button></span></div>
+          )}
           {!dbReady && (
             <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 9, background: T.warnSoft, border: `1px solid #f0dcb8`, color: "#7a5a1a", fontSize: 13, lineHeight: 1.5 }}>
               <b>Let op: je gegevens worden nu in tijdelijk geheugen bewaard en verdwijnen bij een herstart van de server.</b> Koppel in Railway een PostgreSQL-database en zet de variabele <code>DATABASE_URL</code> (Railway doet dit meestal automatisch als je een Postgres-plugin toevoegt). Daarna wordt alles blijvend opgeslagen.
             </div>
           )}
-          {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthRows={derived.monthRows} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
+          {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthRows={derived.monthRows} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} forecastYear={derived.forecastYear} reconciliation={derived.reconciliation} agingAdvances={derived.agingAdvances} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
           {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
           {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} />}
           {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
@@ -3870,7 +4083,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout }) {
           {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
           {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} history={transactions} onCommit={commitImport} onStartReview={startReview} />}
           {tab === "regels" && <Regels rules={rules} categories={categories} groups={groups} transactions={transactions} onToggle={toggleRule} onDelete={deleteRule} onBulkDelete={bulkDeleteRules} onUpdate={updateRule} onAdd={addRule} onAddDefaults={onAddDefaults} />}
-          {tab === "activiteit" && <Activiteit />}
+          {tab === "activiteit" && <><DataBackup dbReady={dbReady} onExport={exportBackup} onImport={importBackup} onRestoreSnapshot={onRestore} /><Activiteit /></>}
         </div>
       </main>
 
@@ -3893,20 +4106,33 @@ export default function App() {
   const [state, setState] = useState(null);
   const [dbReady, setDbReady] = useState(false);
   const [meta, setMeta] = useState(null);
+  const [conflict, setConflict] = useState(false); // een ander apparaat/gebruiker heeft intussen opgeslagen
   const loadedRef = useRef(false);
   const saveTimer = useRef(null);
+  const revRef = useRef(0);          // laatst bevestigde serverrevisie
+  const dirtyRef = useRef(false);    // lokale, nog niet-opgeslagen wijzigingen aanwezig?
+  const savingRef = useRef(false);   // bezig met opslaan (voorkomt overlap met polling)
+
+  const applyServer = useCallback((r, { fromPoll = false } = {}) => {
+    setDbReady(!!r.db);
+    let s = r.state;
+    if (!s) { s = buildSeed(); }
+    else s = mergeSeed(s);
+    revRef.current = r.rev || 0;
+    dirtyRef.current = false;
+    setState(s);
+    setMeta({ updatedBy: r.updatedBy, updatedAt: r.updatedAt });
+    setConflict(false);
+    if (fromPoll) loadedRef.current = true;
+  }, []);
 
   const load = useCallback(async () => {
     const r = await getState();
-    setDbReady(!!r.db);
-    let s = r.state;
-    if (!s) { s = buildSeed(); try { await putState(s); } catch {} }
-    else s = mergeSeed(s);
-    setState(s);
-    setMeta({ updatedBy: r.updatedBy, updatedAt: r.updatedAt });
+    if (!r.state) { const seed = buildSeed(); try { const w = await putState(seed, null); revRef.current = w && w.rev != null ? w.rev : 0; } catch {} setState(seed); setDbReady(!!r.db); setMeta({}); }
+    else applyServer(r);
     loadedRef.current = true;
     setPhase("ready");
-  }, []);
+  }, [applyServer]);
 
   useEffect(() => {
     (async () => {
@@ -3919,14 +4145,42 @@ export default function App() {
     })();
   }, [load]);
 
+  // Opslaan met revisie; bij 409-conflict laten we de lokale wijziging staan en tonen een melding.
   useEffect(() => {
     if (phase !== "ready" || !loadedRef.current || !state) return;
+    dirtyRef.current = true;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      putState(state).then((r) => { setDbReady(!!r.db); if (r.updatedBy) setMeta({ updatedBy: r.updatedBy, updatedAt: new Date().toISOString() }); }).catch(() => {});
+      savingRef.current = true;
+      putState(state, revRef.current)
+        .then((r) => { setDbReady(!!r.db); if (r.rev != null) revRef.current = r.rev; dirtyRef.current = false; if (r.updatedBy) setMeta({ updatedBy: r.updatedBy, updatedAt: new Date().toISOString() }); setConflict(false); })
+        .catch((e) => { if (e && e.conflict) setConflict(true); })
+        .finally(() => { savingRef.current = false; });
     }, 700);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [state, phase]);
+
+  // Polling: haal elke 20s de nieuwste serverversie op als er lokaal niets openstaat.
+  // Zo zie je op apparaat B wat op apparaat A is gedaan, zonder opnieuw in te loggen.
+  useEffect(() => {
+    if (phase !== "ready") return;
+    const iv = setInterval(async () => {
+      if (dirtyRef.current || savingRef.current || conflict) return;
+      try { const r = await getState(); if ((r.rev || 0) !== revRef.current) applyServer(r, { fromPoll: true }); }
+      catch {}
+    }, 20000);
+    return () => clearInterval(iv);
+  }, [phase, conflict, applyServer]);
+
+  // Conflict oplossen: server wint (lokale niet-opgeslagen wijziging gaat verloren — bewust, expliciet).
+  const resolveConflictTakeServer = useCallback(async () => {
+    try { const r = await getState(); applyServer(r); } catch {}
+  }, [applyServer]);
+  // Conflict oplossen: mijn versie wint (overschrijf de server met de laatste rev).
+  const resolveConflictKeepMine = useCallback(async () => {
+    try { const r = await getState(); revRef.current = r.rev || 0; const w = await putState(state, revRef.current); if (w && w.rev != null) revRef.current = w.rev; dirtyRef.current = false; setConflict(false); }
+    catch (e) { if (e && e.conflict) setConflict(true); }
+  }, [state]);
 
   const onLoginSuccess = (r) => {
     setUser(r.user); setDbReady(!!r.db);
@@ -3937,11 +4191,13 @@ export default function App() {
     try { await apiLogout(); } catch {}
     setUser(null); setState(null); loadedRef.current = false; setPhase("login");
   };
+  // Herstel een snapshot: haal 'm op en zet 'm als nieuwe toestand (wordt daarna vanzelf opgeslagen).
+  const restoreState = useCallback((newState) => { setState(mergeSeed(newState)); }, []);
 
   if (phase === "loading")
     return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, color: T.sub, fontFamily: T.sans, fontSize: 14 }}>Bezig met laden…</div>;
   if (phase === "login") return <LoginScreen onSuccess={onLoginSuccess} />;
   if (phase === "change" && user) return <ChangePasswordScreen user={user} onDone={onChangeDone} />;
-  if (phase === "ready" && state && user) return <Workspace state={state} setState={setState} dbReady={dbReady} user={user} meta={meta} onLogout={onLogout} />;
+  if (phase === "ready" && state && user) return <Workspace state={state} setState={setState} dbReady={dbReady} user={user} meta={meta} onLogout={onLogout} conflict={conflict} onTakeServer={resolveConflictTakeServer} onKeepMine={resolveConflictKeepMine} onRestore={restoreState} />;
   return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, color: T.sub, fontFamily: T.sans, fontSize: 14 }}>Bezig met laden…</div>;
 }
