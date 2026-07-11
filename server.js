@@ -8,7 +8,7 @@ import pg from "pg";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
-app.use(express.json({ limit: "4mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 /* ---- Beveiligingsheaders ---- */
 app.use((req, res, next) => {
@@ -98,6 +98,8 @@ let dbReady = false;
 let memUsers = null;          // Map username -> {username, displayName, passwordHash, mustChange}
 let memState = null;          // {data, updatedBy, updatedAt}
 let memLog = [];              // [{username, displayName, action, at}]
+let memAttach = [];           // fallback zonder database: [{id, txId, filename, mime, sizeBytes, data(Buffer), by, at}]
+let memAttachId = 1;
 
 if (process.env.DATABASE_URL) {
   const needsSsl = /sslmode=require/i.test(process.env.DATABASE_URL) || process.env.DATABASE_SSL === "true";
@@ -123,6 +125,12 @@ async function initDb() {
       await pool.query(`CREATE TABLE IF NOT EXISTS audit_log (
         id bigserial PRIMARY KEY, username text NOT NULL, display_name text NOT NULL,
         action text NOT NULL, at timestamptz NOT NULL DEFAULT now())`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at DESC, id DESC)`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS attachments (
+        id bigserial PRIMARY KEY, tx_id text NOT NULL, filename text NOT NULL,
+        mime text NOT NULL, size_bytes integer NOT NULL, data bytea NOT NULL,
+        uploaded_by text, at timestamptz NOT NULL DEFAULT now())`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS attachments_tx_idx ON attachments (tx_id)`);
       dbReady = true;
       console.log("Verbonden met database — gebruikers, logboek en data worden blijvend opgeslagen.");
     } catch (e) {
@@ -184,24 +192,23 @@ async function readState() {
 // of { conflict: true, current } als een ander intussen heeft opgeslagen.
 async function writeState(data, updatedBy, expectedRev) {
   if (dbReady) {
-    const cur = await pool.query(`SELECT rev FROM app_state WHERE id = 1`);
-    const curRev = cur.rows[0] ? Number(cur.rows[0].rev) || 0 : 0;
-    if (expectedRev != null && cur.rows[0] && curRev !== Number(expectedRev)) {
-      const full = await readState();
-      return { conflict: true, current: full };
-    }
-    const newRev = curRev + 1;
-    await pool.query(
-      `INSERT INTO app_state (id, data, updated_by, updated_at, rev) VALUES (1, $1, $2, now(), $3)
-       ON CONFLICT (id) DO UPDATE SET data = $1, updated_by = $2, updated_at = now(), rev = $3`,
-      [data, updatedBy, newRev]
+    // Atomair: rev-controle en verhoging in één UPDATE, zodat twee gelijktijdige saves
+    // elkaar nooit stilletjes kunnen overschrijven (geen race tussen lezen en schrijven).
+    const upd = await pool.query(
+      `UPDATE app_state SET data = $1, updated_by = $2, updated_at = now(), rev = rev + 1
+       WHERE id = 1 AND ($3::bigint IS NULL OR rev = $3::bigint) RETURNING rev`,
+      [data, updatedBy, expectedRev]
     );
-    // Snapshot voor herstel; bewaar de laatste 40.
-    try {
-      await pool.query(`INSERT INTO state_snapshots (data, updated_by, rev) VALUES ($1, $2, $3)`, [data, updatedBy, newRev]);
-      await pool.query(`DELETE FROM state_snapshots WHERE id NOT IN (SELECT id FROM state_snapshots ORDER BY id DESC LIMIT 40)`);
-    } catch (e) { console.error("Snapshot mislukt:", e.message); }
-    return { rev: newRev };
+    if (upd.rows[0]) { const rev = Number(upd.rows[0].rev); await saveSnapshot(data, updatedBy, rev); return { rev }; }
+    // Geen rij geraakt: óf de rij bestaat nog niet (eerste seed), óf de rev klopte niet (conflict).
+    const ins = await pool.query(
+      `INSERT INTO app_state (id, data, updated_by, updated_at, rev) VALUES (1, $1, $2, now(), 1)
+       ON CONFLICT (id) DO NOTHING RETURNING rev`,
+      [data, updatedBy]
+    );
+    if (ins.rows[0]) { await saveSnapshot(data, updatedBy, 1); return { rev: 1 }; }
+    const full = await readState();
+    return { conflict: true, current: full };
   }
   const curRev = memState ? (memState.rev || 0) : 0;
   if (expectedRev != null && memState && curRev !== Number(expectedRev)) {
@@ -209,6 +216,12 @@ async function writeState(data, updatedBy, expectedRev) {
   }
   memState = { data, updatedBy, updatedAt: new Date().toISOString(), rev: curRev + 1 };
   return { rev: curRev + 1 };
+}
+async function saveSnapshot(data, updatedBy, rev) {
+  try {
+    await pool.query(`INSERT INTO state_snapshots (data, updated_by, rev) VALUES ($1, $2, $3)`, [data, updatedBy, rev]);
+    await pool.query(`DELETE FROM state_snapshots WHERE id NOT IN (SELECT id FROM state_snapshots ORDER BY id DESC LIMIT 40)`);
+  } catch (e) { console.error("Snapshot mislukt:", e.message); }
 }
 async function listSnapshots(limit) {
   if (dbReady) {
@@ -260,11 +273,12 @@ const requireAuth = ah(async (req, res, next) => {
 const ipHits = new Map(), userHits = new Map();
 function tooMany(map, key, max, windowMs) {
   const now = Date.now();
+  if (map.size > 1000) for (const [k, v] of map) { if (now - v.ts > windowMs) map.delete(k); } // opruimen: geen onbeperkte groei
   const e = map.get(key);
   if (!e || now - e.ts > windowMs) { map.set(key, { count: 1, ts: now }); return false; }
   e.count++; return e.count > max;
 }
-const clientIp = (req) => String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() || req.socket.remoteAddress || "?";
+const clientIp = (req) => String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "?";
 
 /* ---- API ---- */
 app.get("/api/health", (req, res) => res.json({ ok: true, db: dbReady }));
@@ -346,8 +360,75 @@ app.get("/api/snapshots", requireAuth, ah(async (req, res) => {
 }));
 // Eén snapshot ophalen om te herstellen (client zet 'm daarna via PUT terug).
 app.get("/api/snapshots/:id", requireAuth, ah(async (req, res) => {
-  try { const data = await readSnapshot(Number(req.params.id)); if (data == null) return res.status(404).json({ error: "niet gevonden" }); res.json({ state: data }); }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "ongeldig-id" });
+  try { const data = await readSnapshot(id); if (data == null) return res.status(404).json({ error: "niet gevonden" }); res.json({ state: data }); }
   catch (e) { console.error("Snapshot lezen mislukt:", e.message); res.status(500).json({ error: "fout" }); }
+}));
+
+/* ---- Bijlagen (bonnetjes/facturen) — eigen tabel, volledig los van de financiële state ---- */
+const ATTACH_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
+const ATTACH_MAX = 6 * 1024 * 1024; // 6 MB per bestand (na compressie op de telefoon)
+
+app.post("/api/attachments", requireAuth, ah(async (req, res) => {
+  const { txId, filename, mime, data } = req.body || {};
+  if (!txId || typeof txId !== "string" || txId.length > 120) return res.status(400).json({ error: "ongeldige-transactie" });
+  if (!ATTACH_MIMES.has(String(mime))) return res.status(400).json({ error: "bestandstype-niet-toegestaan" });
+  let buf;
+  try { buf = Buffer.from(String(data || ""), "base64"); } catch { return res.status(400).json({ error: "ongeldige-data" }); }
+  if (!buf.length) return res.status(400).json({ error: "leeg-bestand" });
+  if (buf.length > ATTACH_MAX) return res.status(413).json({ error: "te-groot", maxBytes: ATTACH_MAX });
+  const name = String(filename || "bijlage").slice(0, 140);
+  const by = (req.user && req.user.displayName) || req.username;
+  if (dbReady) {
+    const r = await pool.query(`INSERT INTO attachments (tx_id, filename, mime, size_bytes, data, uploaded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [txId, name, mime, buf.length, buf, by]);
+    await addLog(req.username, by, `bijlage toegevoegd: ${name}`);
+    return res.json({ id: Number(r.rows[0].id) });
+  }
+  const id = memAttachId++;
+  memAttach.push({ id, txId, filename: name, mime, sizeBytes: buf.length, data: buf, by, at: new Date().toISOString() });
+  res.json({ id });
+}));
+
+app.get("/api/attachments/counts", requireAuth, ah(async (req, res) => {
+  if (dbReady) {
+    const r = await pool.query(`SELECT tx_id, count(*)::int AS n FROM attachments GROUP BY tx_id`);
+    const counts = {}; for (const x of r.rows) counts[x.tx_id] = x.n;
+    return res.json({ counts });
+  }
+  const counts = {}; for (const a of memAttach) counts[a.txId] = (counts[a.txId] || 0) + 1;
+  res.json({ counts });
+}));
+
+app.get("/api/attachments/tx/:txId", requireAuth, ah(async (req, res) => {
+  const txId = String(req.params.txId || "").slice(0, 120);
+  if (dbReady) {
+    const r = await pool.query(`SELECT id, filename, mime, size_bytes, uploaded_by, at FROM attachments WHERE tx_id = $1 ORDER BY id DESC`, [txId]);
+    return res.json({ attachments: r.rows.map((x) => ({ id: Number(x.id), filename: x.filename, mime: x.mime, sizeBytes: x.size_bytes, by: x.uploaded_by, at: x.at })) });
+  }
+  res.json({ attachments: memAttach.filter((a) => a.txId === txId).map(({ data, ...m }) => m).reverse() });
+}));
+
+app.get("/api/attachments/:id", requireAuth, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "ongeldig-id" });
+  let a = null;
+  if (dbReady) { const r = await pool.query(`SELECT filename, mime, data FROM attachments WHERE id = $1`, [id]); a = r.rows[0] || null; }
+  else { const m = memAttach.find((x) => x.id === id); if (m) a = { filename: m.filename, mime: m.mime, data: m.data }; }
+  if (!a) return res.status(404).json({ error: "niet gevonden" });
+  res.setHeader("Content-Type", a.mime);
+  res.setHeader("Content-Disposition", `inline; filename="${String(a.filename).replace(/"/g, "")}"`);
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.send(a.data);
+}));
+
+app.delete("/api/attachments/:id", requireAuth, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "ongeldig-id" });
+  if (dbReady) await pool.query(`DELETE FROM attachments WHERE id = $1`, [id]);
+  else memAttach = memAttach.filter((a) => a.id !== id);
+  await addLog(req.username, (req.user && req.user.displayName) || req.username, "bijlage verwijderd");
+  res.json({ ok: true });
 }));
 
 app.post("/api/log", requireAuth, ah(async (req, res) => {

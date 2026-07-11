@@ -21,6 +21,12 @@ export const getState = () => call("GET", "/api/state");
 export const putState = (state, rev) => call("PUT", "/api/state", { state, rev });
 export const getSnapshots = () => call("GET", "/api/snapshots");
 export const getSnapshot = (id) => call("GET", "/api/snapshots/" + id);
+// Bijlagen (bonnetjes/facturen) — losse opslag naast de financiële state.
+export const uploadAttachment = (payload) => call("POST", "/api/attachments", payload);
+export const listAttachments = (txId) => call("GET", "/api/attachments/tx/" + encodeURIComponent(txId));
+export const deleteAttachment = (id) => call("DELETE", "/api/attachments/" + id);
+export const attachmentCounts = () => call("GET", "/api/attachments/counts");
+export const attachmentUrl = (id) => "/api/attachments/" + id;
 export const getActivity = () => call("GET", "/api/activity");
 // logboek-actie; faalt stil zodat het de app nooit ophoudt
 export const logAction = (action) => call("POST", "/api/log", { action }).catch(() => {});
