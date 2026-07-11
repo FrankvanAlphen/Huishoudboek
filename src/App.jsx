@@ -1171,6 +1171,7 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 
 function Overzicht({ vitals, monthRows, monthly = [], topPostsByMonth = [], teSorteren = 0, onDrill, currentMonth, jaar, openActions, forecast, forecastYear = null, reconciliation = null, agingAdvances = [], openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
   const [reopen, setReopen] = useState(false);
+  const [more, setMore] = useState(false); // extra dashboard-kaarten inklapbaar
   const [selMonth, setSelMonth] = useState(currentMonth); // gekozen maand voor het maand-resultaatblok
   useEffect(() => { setSelMonth(currentMonth); }, [currentMonth, jaar]);
   const tile = (label, node, sub, onClick) => (
@@ -1197,75 +1198,6 @@ function Overzicht({ vitals, monthRows, monthly = [], topPostsByMonth = [], teSo
   const perDay = Math.max(0, fc.projectedEnd) / daysLeft;
   return (
     <div>
-      <SectionTitle>Overzicht · t/m {mn[currentMonth - 1]} {jaar}</SectionTitle>
-
-      {!openingSet && (
-        <Card style={{ padding: 16, marginBottom: 16, border: `1px solid #f0dcb8`, background: T.warnSoft }}>
-          <div style={{ fontWeight: 700, fontSize: 14, color: "#9a6a14", marginBottom: 4 }}>Stel eerst je startsaldo in</div>
-          {canReconcile ? (
-            <>
-              <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Je startsaldo is de stand van je betaalrekening vóór je eerste geïmporteerde transactie. Die haal ik uit de saldokolom van je import: <b>{formatEUR(chainOpening)}</b>. Daarna hoort je startsaldo <b>vast te blijven</b> — nieuwe transacties corrigeren je saldo, niet andersom.</div>
-              <Btn onClick={reconcile}>Startsaldo instellen &amp; sluitend maken ({formatEUR(chainOpening)})</Btn>
-            </>
-          ) : (
-            <>
-              <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Vul het saldo van je ING-rekening in zoals het was vóór je eerste transactie. Tip: importeer je ING-bestand met de saldokolom, dan zet ik dit met één knop goed én kan ik controleren of je transacties sluiten.</div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ fontSize: 13, color: T.sub }}>Startsaldo</span>
-                <MoneyInput cents={openingBalanceCents || 0} width={150} onChange={(v) => onSetOpeningBalance(v)} />
-              </div>
-            </>
-          )}
-        </Card>
-      )}
-
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
-        <Card style={{ padding: 18, flex: 2, minWidth: 240, background: "#f3f8f6", border: `1px solid ${T.accent}` }}>
-          <div style={{ fontSize: 13, color: T.sub, marginBottom: 6 }}>Huidig saldo</div>
-          <div style={{ fontSize: 30, fontWeight: 800 }}><Money cents={fc.accountBalance} sign bold size={30} /></div>
-          <div style={{ fontSize: 12, color: T.sub, marginTop: 6 }}>startsaldo + alle mutaties</div>
-          {openingSet && gaps && (
-            <div style={{ marginTop: 10, background: "#fbe9e9", border: `1px solid ${T.neg}`, borderRadius: 8, padding: "9px 11px" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.neg }}>⚠ Je transacties sluiten niet</div>
-              <div style={{ fontSize: 12, color: "#7a2a2a", margin: "4px 0 8px" }}>De bankmutaties sluiten op {saldoGaps} plek{saldoGaps > 1 ? "ken" : ""} niet op elkaar aan. Er ontbreken transacties of er staan dubbele in — je startsaldo blijft staan, dit los je op door de ontbrekende periode te importeren of een dubbele te verwijderen.</div>
-              <Btn size="sm" variant="secondary" onClick={() => onGoto && onGoto("transacties")}>Bekijk transacties</Btn>
-            </div>
-          )}
-          {openingSet && !gaps && haveBank && (
-            bankMatch
-              ? <div style={{ marginTop: 10, fontSize: 13, fontWeight: 700, color: T.pos, display: "flex", alignItems: "center", gap: 6 }}>✓ Je saldo sluit met je bank ({formatEUR(bankBalanceCents)})</div>
-              : <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub, background: T.panel, border: `1px solid ${T.line}`, borderRadius: 8, padding: "8px 10px" }}>Je bankmutaties sluiten netjes op elkaar aan. Je huidige saldo wijkt {formatEUR(Math.abs(diff))} af van het banksaldo uit je import ({formatEUR(bankBalanceCents)}) — dat kan kloppen als je handmatige (contante) transacties hebt toegevoegd. Klopt dat niet, controleer dan je startsaldo via "opnieuw instellen".</div>
-          )}
-          {openingSet && (
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 12, color: T.sub }}>Startsaldo <b style={{ fontFamily: T.mono, color: T.ink }}>{formatEUR(openingBalanceCents || 0)}</b> · vast</span>
-              <button onClick={() => setReopen((s) => !s)} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{reopen ? "annuleren" : "opnieuw instellen"}</button>
-            </div>
-          )}
-          {openingSet && reopen && (
-            <div style={{ marginTop: 8, background: T.warnSoft, border: "1px solid #f0dcb8", borderRadius: 8, padding: "9px 11px" }}>
-              <div style={{ fontSize: 12, color: "#7a5a1a", marginBottom: 8 }}>Normaal hoef je dit niet: je startsaldo hoort vast te blijven en transacties corrigeren je saldo. Wijzig het alleen als je echt opnieuw wil aansluiten.</div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                {canReconcile && <Btn size="sm" onClick={reconcile}>Uit saldo-keten ({formatEUR(chainOpening)})</Btn>}
-                <span style={{ fontSize: 12, color: T.sub }}>of handmatig:</span>
-                <MoneyInput cents={openingBalanceCents || 0} width={140} onChange={(v) => onSetOpeningBalance(v)} />
-              </div>
-            </div>
-          )}
-        </Card>
-        <Card style={{ padding: 18, flex: 1, minWidth: 240, background: haalt ? "#eef7f0" : "#fdeeee", border: `1px solid ${haalt ? T.pos : T.neg}` }}>
-          <div style={{ fontSize: 13, color: T.sub, marginBottom: 6 }}>Red ik het in {mn[fc.month - 1]}?</div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: haalt ? T.pos : T.neg }}>{haalt ? "Ja" : "Krap"} · <Money cents={fc.projectedEnd} sign bold size={22} /></div>
-          <div style={{ fontSize: 12, color: T.sub, marginTop: 8, lineHeight: 1.6 }}>
-            Huidig saldo <b>{formatEUR(fc.accountBalance)}</b><br />
-            + nog te verwachten inkomsten <b style={{ color: T.pos }}>{formatEUR(fc.remainingInc)}</b><br />
-            − nog te verwachten uitgaven <b style={{ color: T.neg }}>{formatEUR(fc.remainingOut)}</b><br />
-            = verwacht saldo eind van de maand
-          </div>
-          {fc.openingSet && fc.projectedEnd > 0 && <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${haalt ? "#cfe6d3" : "#f3cccc"}`, fontSize: 13 }}>Veilig te besteden: <b>≈ {formatEUR(perDay)} per dag</b> <span style={{ color: T.sub }}>· nog {daysLeft} dag{daysLeft > 1 ? "en" : ""} deze maand</span></div>}
-        </Card>
-      </div>
-
       {teSorteren > 0 && (
         <Card style={{ padding: "12px 16px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", border: `1px solid ${T.warn}`, background: T.warnSoft }}>
           <div style={{ fontSize: 13 }}><b>{teSorteren}</b> transactie{teSorteren > 1 ? "s" : ""} nog toe te kennen — loop ze in één keer na.</div>
@@ -1352,11 +1284,6 @@ function Overzicht({ vitals, monthRows, monthly = [], topPostsByMonth = [], teSo
         );
       })()}
 
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
-        {tile("Gereserveerd vermogen", <Money cents={vitals.vermogen} bold />, `${vitals.potCount} rekeningen · bekijk opbouw`, () => onGoto && onGoto("vermogen"))}
-        {savingsRate && tile("Besparingsratio deze maand", <span style={{ color: savingsRate.rate == null ? T.ink : savingsRate.rate >= 0 ? T.pos : T.neg }}>{savingsRate.rate != null ? `${Math.round(savingsRate.rate * 100)}%` : "—"}</span>, savingsRate.rate != null ? `${formatEUR(savingsRate.saved)} opzij van ${formatEUR(savingsRate.income)}` : "nog geen inkomsten deze maand")}
-      </div>
-
       {monthly.length === 12 && (() => {
         const short = ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
         const rows = monthly.map((m, i) => ({ i, has: m.income !== 0 || m.expense !== 0, ink: m.income - m.fromSavings, uit: m.expense - m.toSavings }));
@@ -1383,6 +1310,84 @@ function Overzicht({ vitals, monthRows, monthly = [], topPostsByMonth = [], teSo
           </Card>
         );
       })()}
+
+      <button onClick={() => setMore((v) => !v)} style={{ width: "100%", textAlign: "left", border: `1px dashed ${T.line}`, background: "transparent", color: T.sub, borderRadius: 10, padding: "11px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 16 }}>
+        {more ? "▴ Minder tonen" : "▾ Meer inzicht — saldo & afletteren, prognose, voorschotten, vaste lasten, afwijkingen"}
+      </button>
+      {more && (<>
+      <SectionTitle>Overzicht · t/m {mn[currentMonth - 1]} {jaar}</SectionTitle>
+
+      {!openingSet && (
+        <Card style={{ padding: 16, marginBottom: 16, border: `1px solid #f0dcb8`, background: T.warnSoft }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#9a6a14", marginBottom: 4 }}>Stel eerst je startsaldo in</div>
+          {canReconcile ? (
+            <>
+              <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Je startsaldo is de stand van je betaalrekening vóór je eerste geïmporteerde transactie. Die haal ik uit de saldokolom van je import: <b>{formatEUR(chainOpening)}</b>. Daarna hoort je startsaldo <b>vast te blijven</b> — nieuwe transacties corrigeren je saldo, niet andersom.</div>
+              <Btn onClick={reconcile}>Startsaldo instellen &amp; sluitend maken ({formatEUR(chainOpening)})</Btn>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 13, color: "#7a5a1a", marginBottom: 10 }}>Vul het saldo van je ING-rekening in zoals het was vóór je eerste transactie. Tip: importeer je ING-bestand met de saldokolom, dan zet ik dit met één knop goed én kan ik controleren of je transacties sluiten.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 13, color: T.sub }}>Startsaldo</span>
+                <MoneyInput cents={openingBalanceCents || 0} width={150} onChange={(v) => onSetOpeningBalance(v)} />
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+        <Card style={{ padding: 18, flex: 2, minWidth: 240, background: "#f3f8f6", border: `1px solid ${T.accent}` }}>
+          <div style={{ fontSize: 13, color: T.sub, marginBottom: 6 }}>Huidig saldo</div>
+          <div style={{ fontSize: 30, fontWeight: 800 }}><Money cents={fc.accountBalance} sign bold size={30} /></div>
+          <div style={{ fontSize: 12, color: T.sub, marginTop: 6 }}>startsaldo + alle mutaties</div>
+          {openingSet && gaps && (
+            <div style={{ marginTop: 10, background: "#fbe9e9", border: `1px solid ${T.neg}`, borderRadius: 8, padding: "9px 11px" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.neg }}>⚠ Je transacties sluiten niet</div>
+              <div style={{ fontSize: 12, color: "#7a2a2a", margin: "4px 0 8px" }}>De bankmutaties sluiten op {saldoGaps} plek{saldoGaps > 1 ? "ken" : ""} niet op elkaar aan. Er ontbreken transacties of er staan dubbele in — je startsaldo blijft staan, dit los je op door de ontbrekende periode te importeren of een dubbele te verwijderen.</div>
+              <Btn size="sm" variant="secondary" onClick={() => onGoto && onGoto("transacties")}>Bekijk transacties</Btn>
+            </div>
+          )}
+          {openingSet && !gaps && haveBank && (
+            bankMatch
+              ? <div style={{ marginTop: 10, fontSize: 13, fontWeight: 700, color: T.pos, display: "flex", alignItems: "center", gap: 6 }}>✓ Je saldo sluit met je bank ({formatEUR(bankBalanceCents)})</div>
+              : <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub, background: T.panel, border: `1px solid ${T.line}`, borderRadius: 8, padding: "8px 10px" }}>Je bankmutaties sluiten netjes op elkaar aan. Je huidige saldo wijkt {formatEUR(Math.abs(diff))} af van het banksaldo uit je import ({formatEUR(bankBalanceCents)}) — dat kan kloppen als je handmatige (contante) transacties hebt toegevoegd. Klopt dat niet, controleer dan je startsaldo via "opnieuw instellen".</div>
+          )}
+          {openingSet && (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: T.sub }}>Startsaldo <b style={{ fontFamily: T.mono, color: T.ink }}>{formatEUR(openingBalanceCents || 0)}</b> · vast</span>
+              <button onClick={() => setReopen((s) => !s)} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{reopen ? "annuleren" : "opnieuw instellen"}</button>
+            </div>
+          )}
+          {openingSet && reopen && (
+            <div style={{ marginTop: 8, background: T.warnSoft, border: "1px solid #f0dcb8", borderRadius: 8, padding: "9px 11px" }}>
+              <div style={{ fontSize: 12, color: "#7a5a1a", marginBottom: 8 }}>Normaal hoef je dit niet: je startsaldo hoort vast te blijven en transacties corrigeren je saldo. Wijzig het alleen als je echt opnieuw wil aansluiten.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {canReconcile && <Btn size="sm" onClick={reconcile}>Uit saldo-keten ({formatEUR(chainOpening)})</Btn>}
+                <span style={{ fontSize: 12, color: T.sub }}>of handmatig:</span>
+                <MoneyInput cents={openingBalanceCents || 0} width={140} onChange={(v) => onSetOpeningBalance(v)} />
+              </div>
+            </div>
+          )}
+        </Card>
+        <Card style={{ padding: 18, flex: 1, minWidth: 240, background: haalt ? "#eef7f0" : "#fdeeee", border: `1px solid ${haalt ? T.pos : T.neg}` }}>
+          <div style={{ fontSize: 13, color: T.sub, marginBottom: 6 }}>Red ik het in {mn[fc.month - 1]}?</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: haalt ? T.pos : T.neg }}>{haalt ? "Ja" : "Krap"} · <Money cents={fc.projectedEnd} sign bold size={22} /></div>
+          <div style={{ fontSize: 12, color: T.sub, marginTop: 8, lineHeight: 1.6 }}>
+            Huidig saldo <b>{formatEUR(fc.accountBalance)}</b><br />
+            + nog te verwachten inkomsten <b style={{ color: T.pos }}>{formatEUR(fc.remainingInc)}</b><br />
+            − nog te verwachten uitgaven <b style={{ color: T.neg }}>{formatEUR(fc.remainingOut)}</b><br />
+            = verwacht saldo eind van de maand
+          </div>
+          {fc.openingSet && fc.projectedEnd > 0 && <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${haalt ? "#cfe6d3" : "#f3cccc"}`, fontSize: 13 }}>Veilig te besteden: <b>≈ {formatEUR(perDay)} per dag</b> <span style={{ color: T.sub }}>· nog {daysLeft} dag{daysLeft > 1 ? "en" : ""} deze maand</span></div>}
+        </Card>
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+        {tile("Gereserveerd vermogen", <Money cents={vitals.vermogen} bold />, `${vitals.potCount} rekeningen · bekijk opbouw`, () => onGoto && onGoto("vermogen"))}
+        {savingsRate && tile("Besparingsratio deze maand", <span style={{ color: savingsRate.rate == null ? T.ink : savingsRate.rate >= 0 ? T.pos : T.neg }}>{savingsRate.rate != null ? `${Math.round(savingsRate.rate * 100)}%` : "—"}</span>, savingsRate.rate != null ? `${formatEUR(savingsRate.saved)} opzij van ${formatEUR(savingsRate.income)}` : "nog geen inkomsten deze maand")}
+      </div>
 
       {forecastYear && (
         <Card style={{ padding: 16, marginBottom: 16 }}>
@@ -1536,6 +1541,7 @@ function Overzicht({ vitals, monthRows, monthly = [], topPostsByMonth = [], teSo
           })}
         </Card>
       </div>
+      </>)}
     </div>
   );
 }
@@ -1930,7 +1936,7 @@ function TrendView({ categories, actualByCat, names, monthsElapsed }) {
 
 function Uitgaven({ groups, categories, budgets, year, years = [], transactions, onAddCategory, onSetYtd, onSetSubBudget }) {
   const [expanded, setExpanded] = useState(null);
-  const [view, setView] = useState("vergelijking"); // vergelijking | blokjes | maand
+  const [view, setView] = useState("analyse"); // startweergave: Begroot vs besteed
   const [viewYearId, setViewYearId] = useState(year.id);
   const vY = years.find((y) => y.id === viewYearId) || year;
   const monthsElapsed = useMemo(() => { let m = 1; for (const t of transactions) if (effYear(t) === vY.jaartal) m = Math.max(m, effMonth(t)); return m; }, [transactions, vY]);
@@ -1979,7 +1985,7 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
             </div>
           )}
           <div style={{ display: "inline-flex", border: `1px solid ${T.line}`, borderRadius: 9, overflow: "hidden" }}>
-            {[["vergelijking", "Vergelijking"], ["analyse", "Begroot vs besteed"], ["maand", "Per maand"], ["trend", "Trend"], ["winkels", "Per winkel"], ["subposten", "Subposten"], ["abonnementen", "Abonnementen"], ["bundels", "Bundels"], ["blokjes", "Blokjes per post"]].map(([v, lbl]) => (
+            {[["analyse", "Begroot vs besteed"], ["maand", "Per maand"], ["blokjes", "Blokjes per post"], ["vergelijking", "Vergelijking"], ["trend", "Trend"], ["winkels", "Per winkel"], ["subposten", "Subposten"], ["bundels", "Bundels"], ["abonnementen", "Abonnementen"]].map(([v, lbl]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding: "7px 13px", border: "none", background: view === v ? T.accent : T.panel, color: view === v ? "#fff" : T.sub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{lbl}</button>
             ))}
           </div>
@@ -2065,7 +2071,7 @@ function MaandMatrix({ groups, categories, lines, actualByCat, names }) {
   const rowsByGroup = groups.map((g) => ({ g, cats: categories.filter((c) => c.groupId === g.id && (sumMonths(src(c.id)) !== 0)) })).filter((x) => x.cats.length > 0);
   for (const { cats } of rowsByGroup) for (const c of cats) src(c.id).forEach((v, i) => colTotals[i] += Math.abs(v));
   return (
-    <div>
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
         <div style={{ display: "inline-flex", border: `1px solid ${T.line}`, borderRadius: 8, overflow: "hidden" }}>
           {[["werkelijk", "Werkelijk"], ["begroot", "Begroot"]].map(([v, l]) => (
@@ -2122,7 +2128,7 @@ function BegrootBesteed({ groups, categories, budgets, year, transactions, onSet
   const bar = (spent, begroot, income) => { const pct = begroot > 0 ? Math.min(100, Math.round((spent / begroot) * 100)) : (spent > 0 ? 100 : 0); const over = !income && spent > begroot && begroot > 0; const col = income ? (spent >= begroot ? T.pos : T.accent) : (over ? T.neg : T.accent); return <div style={{ height: 5, background: "#eef3f1", borderRadius: 999, overflow: "hidden", marginTop: 5 }}><div style={{ width: `${pct}%`, height: "100%", background: col }} /></div>; };
   const totals = (cats) => cats.reduce((o, c) => { o.b += begrootOf(c); o.s += spentOf(c); return o; }, { b: 0, s: 0 });
   return (
-    <div>
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       <div style={{ marginBottom: 12 }}><Banner tone="neutral">Begroot vs besteed voor {year.jaartal}. Vul per post bij <b>t/m heden</b> in wat er dit jaar al is besteed of ontvangen vóór je begon met importeren — dat tel ik op bij de geïmporteerde transacties. Posten met subposten kun je uitklappen voor de verdeling.</Banner></div>
       <Card style={{ overflow: "hidden" }}>
         <div style={{ display: "grid", gridTemplateColumns: grid, gap: 10, padding: "9px 16px", background: "#eef3f1" }}>
@@ -2217,7 +2223,7 @@ function WinkelMatrix({ categories, transactions, vY, names }) {
   const cell = (v) => v === 0 ? <span style={{ color: "#cbd5d1" }}>—</span> : formatEUR(v);
   if (superCats.length === 0) return <Card style={{ padding: 18 }}><div style={{ fontSize: 13, color: T.sub }}>Geen boodschappen-post gevonden om uit te splitsen.</div></Card>;
   return (
-    <div>
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       <div style={{ marginBottom: 10 }}><Banner tone="neutral">Je boodschappen ({superCats.map((c) => c.naam).join(", ")}) per winkelketen per maand. Ketens worden herkend aan de naam van de transactie; staat een winkel onder een rare naam, voeg dan een regel toe of laat het me weten.</Banner></div>
       <Card style={{ overflow: "auto" }}>
         <div style={{ minWidth: minW }}>
@@ -2853,28 +2859,39 @@ const TX_COLS = "78px 1fr 96px 200px 40px 34px";
 // Comprimeer een foto op het apparaat vóór upload (max 1600px, JPEG ~80%); PDF's gaan ongewijzigd.
 async function fileToUploadPayload(file) {
   const MAX_RAW = 6 * 1024 * 1024;
-  const isImage = /^image\//.test(file.type);
+  const isImage = /^image\//.test(file.type) || /\.(heic|heif|jpe?g|png|webp)$/i.test(file.name || "");
   if (isImage) {
+    const toJpeg = (w, h, draw) => {
+      const c = document.createElement("canvas");
+      const scale = Math.min(1, 1600 / Math.max(w, h, 1));
+      c.width = Math.max(1, Math.round(w * scale)); c.height = Math.max(1, Math.round(h * scale));
+      draw(c.getContext("2d"), c.width, c.height);
+      const d = c.toDataURL("image/jpeg", 0.8);
+      return { filename: (file.name || "foto").replace(/\.[^.]+$/, "") + ".jpg", mime: "image/jpeg", data: d.split(",")[1] };
+    };
+    try { const bmp = await createImageBitmap(file); return toJpeg(bmp.width, bmp.height, (ctx, w, h) => ctx.drawImage(bmp, 0, 0, w, h)); } catch { /* val door naar <img>-route */ }
+    // Fallback voor o.a. iPhone-foto's (HEIC): een <img>-element kan formaten decoderen die createImageBitmap niet aankan.
     try {
-      const bmp = await createImageBitmap(file);
-      const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
-      canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
-      return { filename: file.name.replace(/\.[^.]+$/, "") + ".jpg", mime: "image/jpeg", data: dataUrl.split(",")[1] };
-    } catch { /* val terug op het origineel */ }
+      const url = URL.createObjectURL(file);
+      const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("decode")); im.src = url; });
+      const out = toJpeg(img.naturalWidth, img.naturalHeight, (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h));
+      URL.revokeObjectURL(url);
+      return out;
+    } catch { throw new Error("Deze foto kan niet worden gelezen op dit apparaat — maak eventueel een schermafbeelding van de foto en upload die."); }
   }
+  if (file.type !== "application/pdf" && !/\.pdf$/i.test(file.name || "")) throw new Error("Alleen foto's of PDF-bestanden.");
   if (file.size > MAX_RAW) throw new Error("Bestand is groter dan 6 MB.");
   const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = () => rej(new Error("lezen mislukt")); r.readAsDataURL(file); });
-  return { filename: file.name, mime: file.type === "application/pdf" ? "application/pdf" : file.type, data: b64 };
+  return { filename: file.name, mime: "application/pdf", data: b64 };
 }
 // Bijlagen bij één transactie: uploaden (camera/galerij/PDF), bekijken en verwijderen.
 function Bijlagen({ tx, onChanged }) {
   const [items, setItems] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [flash, setFlash] = useState("");
   const fileRef = useRef(null);
+  const camRef = useRef(null);
   const load = useCallback(() => { listAttachments(tx.id).then((r) => setItems(r.attachments || [])).catch(() => setItems([])); }, [tx.id]);
   useEffect(() => { load(); }, [load]);
   const pick = async (file) => {
@@ -2885,16 +2902,20 @@ function Bijlagen({ tx, onChanged }) {
       if (!["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(payload.mime)) throw new Error("Alleen foto's (jpg/png/webp) of PDF.");
       await uploadAttachment({ txId: tx.id, ...payload });
       load(); if (onChanged) onChanged();
+      setFlash("✓ toegevoegd"); setTimeout(() => setFlash(""), 2500);
     } catch (e) { setErr(e && e.message ? e.message : "Uploaden mislukt."); }
     finally { setBusy(false); }
   };
   const remove = async (id) => { if (!confirm("Deze bijlage verwijderen?")) return; try { await deleteAttachment(id); load(); if (onChanged) onChanged(); } catch {} };
   return (
     <div style={{ marginTop: 8, background: "#f7faf9", border: `1px solid ${T.line}`, borderRadius: 9, padding: "10px 12px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <input ref={fileRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={(e) => { pick(e.target.files[0]); e.target.value = ""; }} />
-        <Btn size="sm" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}>{busy ? "Bezig…" : "📎 Foto of PDF toevoegen"}</Btn>
-        <span style={{ fontSize: 11.5, color: T.sub }}>foto's worden automatisch verkleind · max 6 MB</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <input ref={camRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={(e) => { pick(e.target.files[0]); e.target.value = ""; }} />
+        <input ref={fileRef} type="file" accept="image/*,.pdf,application/pdf,.heic,.heif" style={{ display: "none" }} onChange={(e) => { pick(e.target.files[0]); e.target.value = ""; }} />
+        <Btn size="sm" onClick={() => camRef.current && camRef.current.click()} disabled={busy}>{busy ? "Bezig…" : "📷 Foto maken"}</Btn>
+        <Btn size="sm" variant="secondary" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}>📁 Bestand kiezen</Btn>
+        {flash && <span style={{ fontSize: 12.5, color: T.pos, fontWeight: 700 }}>{flash}</span>}
+        {!flash && <span style={{ fontSize: 11.5, color: T.sub }}>foto's worden automatisch verkleind · max 6 MB</span>}
       </div>
       {err && <div style={{ marginTop: 8, fontSize: 12, color: T.neg }}>{err}</div>}
       {items && items.length > 0 && (
@@ -2910,6 +2931,7 @@ function Bijlagen({ tx, onChanged }) {
           ))}
         </div>
       )}
+      {items == null && <div style={{ marginTop: 8, fontSize: 12, color: T.sub }}>Bijlagen laden…</div>}
       {items && items.length === 0 && <div style={{ marginTop: 8, fontSize: 12, color: T.sub }}>Nog geen bijlagen bij deze transactie.</div>}
     </div>
   );
@@ -2918,11 +2940,14 @@ function Bijlagen({ tx, onChanged }) {
 function TaakKnop({ tx, otherName, onAddTask }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
+  const [done, setDone] = useState(false);
+  if (done) return <span style={{ fontSize: 12.5, color: T.pos, fontWeight: 700 }}>✓ Klaargezet voor {otherName}</span>;
   if (!open) return <Btn size="sm" variant="ghost" onClick={() => setOpen(true)}>→ Taak voor {otherName}</Btn>;
+  const submit = () => { onAddTask(tx.id, note.trim()); setNote(""); setDone(true); setTimeout(() => { setDone(false); setOpen(false); }, 2200); };
   return (
     <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-      <input autoFocus value={note} onChange={(e) => setNote(e.target.value)} placeholder="korte toelichting (optioneel)" style={{ border: `1px solid ${T.line}`, borderRadius: 7, padding: "6px 9px", fontSize: 12.5, width: 220 }} />
-      <Btn size="sm" onClick={() => { onAddTask(tx.id, note.trim()); setNote(""); setOpen(false); }}>Klaarzetten</Btn>
+      <input autoFocus value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} placeholder="korte toelichting (optioneel)" style={{ border: `1px solid ${T.line}`, borderRadius: 7, padding: "6px 9px", fontSize: 12.5, width: 220, maxWidth: "60vw" }} />
+      <Btn size="sm" onClick={submit}>Klaarzetten</Btn>
       <Btn size="sm" variant="ghost" onClick={() => setOpen(false)}>×</Btn>
     </span>
   );
@@ -3992,8 +4017,21 @@ function MobileHome({ user, otherName, bankNow, teSorteren, transactions, tasks,
             <div style={{ fontWeight: 800, fontSize: 14 }}>{mode === "bijlage" ? "Kies de transactie voor de bijlage" : `Kies de transactie voor ${otherName}`}</div>
             <Btn size="sm" variant="ghost" onClick={closePicker}>×</Btn>
           </div>
-          <input value={q} onChange={(e) => { setQ(e.target.value); setPickedId(null); }} placeholder="zoek op naam of mededeling" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.line}`, borderRadius: 9, padding: "10px 12px", fontSize: 14, marginBottom: 4 }} />
-          <div style={{ maxHeight: 300, overflowY: "auto" }}>{recent.map(txRowBtn)}</div>
+          {!picked && (
+            <>
+              <input value={q} onChange={(e) => { setQ(e.target.value); setPickedId(null); }} placeholder="zoek op naam of mededeling" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.line}`, borderRadius: 9, padding: "10px 12px", fontSize: 14, marginBottom: 4 }} />
+              <div style={{ maxHeight: 300, overflowY: "auto" }}>{recent.map(txRowBtn)}</div>
+            </>
+          )}
+          {picked && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, background: T.accentSoft, borderRadius: 9, padding: "10px 12px" }}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{picked.name}</span>
+                <span style={{ display: "block", fontSize: 11.5, color: T.sub }}>{picked.date.slice(8, 10)}-{picked.date.slice(5, 7)} · {picked.amountCents < 0 ? "−" : "+"} {formatEUR(Math.abs(picked.amountCents))}</span>
+              </span>
+              <Btn size="sm" variant="ghost" onClick={() => setPickedId(null)}>andere kiezen</Btn>
+            </div>
+          )}
           {picked && mode === "bijlage" && <Bijlagen tx={picked} onChanged={onAttachChanged} />}
           {picked && mode === "taak" && (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.line}` }}>
