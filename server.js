@@ -7,6 +7,9 @@ import pg from "pg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+// Achter precies één proxy (Railway). Hierdoor is req.ip het adres dat de proxy zelf heeft
+// vastgesteld — niet wat de bezoeker in de header zette.
+app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(express.json({ limit: "10mb" }));
 
@@ -16,6 +19,19 @@ app.use((req, res, next) => {
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  // Beperkt wat de pagina mag laden/uitvoeren: alles van onszelf, geen externe scripts,
+  // geen frames, geen plug-ins. Vangt XSS af mocht er ooit onbedoeld HTML binnenkomen.
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; "));
   if (process.env.COOKIE_INSECURE !== "true") res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
   next();
 });
@@ -30,25 +46,48 @@ const COOKIE_SECURE = process.env.COOKIE_INSECURE !== "true";
 
 /* ---- De twee gebruikers met hun TIJDELIJKE startwachtwoord ----
    Bij de eerste keer inloggen moet ieder een eigen nieuw wachtwoord kiezen.
-   Tip: zet FRANK_TEMP_PW / KIMBERLEY_TEMP_PW in Railway om de startwachtwoorden niet in de broncode te hebben. */
+   Startwachtwoorden staan bewust NIET in de broncode: zet FRANK_TEMP_PW / KIMBERLEY_TEMP_PW in
+   Railway, of laat ze leeg — dan genereert de server een willekeurig wachtwoord en zet het
+   eenmalig in het opstartlog. Dit geldt alleen bij een lege database; bestaande accounts
+   worden nooit aangeraakt (ON CONFLICT DO NOTHING). */
+const genTempPw = () => crypto.randomBytes(9).toString("base64url");
 const SEED_USERS = [
-  { username: "frank", displayName: "Frank van Alphen", tempPassword: process.env.FRANK_TEMP_PW || "@chterZoom24!" },
-  { username: "kimberley", displayName: "Kimberley Lagendijk", tempPassword: process.env.KIMBERLEY_TEMP_PW || "V00rZoom24!" },
+  { username: "frank", displayName: "Frank van Alphen", tempPassword: process.env.FRANK_TEMP_PW || genTempPw() },
+  { username: "kimberley", displayName: "Kimberley Lagendijk", tempPassword: process.env.KIMBERLEY_TEMP_PW || genTempPw() },
 ];
 
-/* ---- Wachtwoord-hashing (scrypt, ingebouwd in Node) ---- */
-function hashPassword(pw) {
+/* ---- Wachtwoord-hashing (scrypt, ingebouwd in Node) ----
+   Kosten staan in de hash zelf ("scrypt$N$r$p$salt$hash"), zodat ze later te verhogen zijn
+   zonder iemand buiten te sluiten. Oude hashes ("salt:hash", Node-standaardkosten N=16384)
+   blijven werken en worden bij een geslaagde login stilletjes omgezet naar de nieuwe kosten.
+   Async i.p.v. sync: hashen blokkeert de server niet meer tijdens inloggen. */
+const SCRYPT = { N: 65536, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }; // ~64 MB per poging: fors duurder voor een aanvaller met een gestolen database
+const scryptAsync = (pw, salt, keylen, opts) =>
+  new Promise((resolve, reject) => crypto.scrypt(pw, salt, keylen, opts, (err, dk) => (err ? reject(err) : resolve(dk))));
+
+async function hashPassword(pw) {
   const salt = crypto.randomBytes(16);
-  const dk = crypto.scryptSync(String(pw), salt, 64);
-  return salt.toString("hex") + ":" + dk.toString("hex");
+  const dk = await scryptAsync(String(pw), salt, 64, SCRYPT);
+  return `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString("hex")}$${dk.toString("hex")}`;
 }
-function verifyPassword(pw, stored) {
+// Geeft { ok, needsUpgrade } terug; needsUpgrade = wachtwoord klopt maar de hash gebruikt nog oude kosten.
+async function verifyPassword(pw, stored) {
   try {
-    const [saltHex, hashHex] = String(stored).split(":");
-    const dk = crypto.scryptSync(String(pw), Buffer.from(saltHex, "hex"), 64);
+    const s = String(stored);
+    let N = 16384, r = 8, p = 1, saltHex, hashHex, nieuw = false;
+    if (s.startsWith("scrypt$")) {
+      const parts = s.split("$");
+      N = Number(parts[1]); r = Number(parts[2]); p = Number(parts[3]); saltHex = parts[4]; hashHex = parts[5];
+      nieuw = true;
+    } else {
+      [saltHex, hashHex] = s.split(":");
+    }
+    if (!saltHex || !hashHex) return { ok: false, needsUpgrade: false };
+    const dk = await scryptAsync(String(pw), Buffer.from(saltHex, "hex"), 64, { N, r, p, maxmem: 256 * 1024 * 1024 });
     const a = Buffer.from(hashHex, "hex");
-    return a.length === dk.length && crypto.timingSafeEqual(a, dk);
-  } catch { return false; }
+    const ok = a.length === dk.length && crypto.timingSafeEqual(a, dk);
+    return { ok, needsUpgrade: ok && !(nieuw && N >= SCRYPT.N) };
+  } catch { return { ok: false, needsUpgrade: false }; }
 }
 
 /* ---- Sessie-cookie ----
@@ -103,7 +142,13 @@ let memAttachId = 1;
 
 if (process.env.DATABASE_URL) {
   const needsSsl = /sslmode=require/i.test(process.env.DATABASE_URL) || process.env.DATABASE_SSL === "true";
-  pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: needsSsl ? { rejectUnauthorized: false } : false, max: 4 });
+  // DATABASE_SSL_STRICT=true + DATABASE_CA (PEM) => volledige certificaatcontrole.
+  // Standaard uit: Railway's interne netwerk gebruikt een zelfondertekend certificaat.
+  const strict = process.env.DATABASE_SSL_STRICT === "true";
+  const ssl = needsSsl || strict
+    ? { rejectUnauthorized: strict, ...(process.env.DATABASE_CA ? { ca: process.env.DATABASE_CA } : {}) }
+    : false;
+  pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl, max: 4 });
 }
 
 async function initDb() {
@@ -146,16 +191,22 @@ async function initDb() {
 async function ensureSeedUsers() {
   if (dbReady) {
     for (const u of SEED_USERS) {
-      await pool.query(
+      const r = await pool.query(
         `INSERT INTO users (username, display_name, password_hash, must_change)
-         VALUES ($1, $2, $3, true) ON CONFLICT (username) DO NOTHING`,
-        [u.username, u.displayName, hashPassword(u.tempPassword)]
+         VALUES ($1, $2, $3, true) ON CONFLICT (username) DO NOTHING RETURNING username`,
+        [u.username, u.displayName, await hashPassword(u.tempPassword)]
       );
+      // Alleen bij een écht nieuw account het tijdelijke wachtwoord tonen (bestaande accounts: niets loggen).
+      if (r.rows[0] && !process.env[`${u.username.toUpperCase()}_TEMP_PW`])
+        console.log(`Nieuw account "${u.username}" aangemaakt. Tijdelijk wachtwoord: ${u.tempPassword}  (moet bij de eerste login gewijzigd worden)`);
     }
   } else {
     memUsers = new Map();
     for (const u of SEED_USERS)
-      memUsers.set(u.username, { username: u.username, displayName: u.displayName, passwordHash: hashPassword(u.tempPassword), mustChange: true });
+      {
+      memUsers.set(u.username, { username: u.username, displayName: u.displayName, passwordHash: await hashPassword(u.tempPassword), mustChange: true });
+      if (!process.env[`${u.username.toUpperCase()}_TEMP_PW`]) console.log(`Tijdelijk account "${u.username}" (geheugenmodus). Tijdelijk wachtwoord: ${u.tempPassword}`);
+    }
   }
 }
 
@@ -174,6 +225,11 @@ async function listUsers() {
     return r.rows.map((x) => ({ username: x.username, displayName: x.display_name }));
   }
   return [...(memUsers ? memUsers.values() : [])].map((u) => ({ username: u.username, displayName: u.displayName }));
+}
+// Alleen de hash vervangen (kosten-upgrade); raakt must_change bewust NIET aan.
+async function updatePasswordHash(username, hash) {
+  if (dbReady) await pool.query(`UPDATE users SET password_hash = $1 WHERE username = $2`, [hash, username]);
+  else { const u = memUsers.get(username); if (u) u.passwordHash = hash; }
 }
 async function setUserPassword(username, hash) {
   if (dbReady) await pool.query(`UPDATE users SET password_hash = $1, must_change = false WHERE username = $2`, [hash, username]);
@@ -278,7 +334,10 @@ function tooMany(map, key, max, windowMs) {
   if (!e || now - e.ts > windowMs) { map.set(key, { count: 1, ts: now }); return false; }
   e.count++; return e.count > max;
 }
-const clientIp = (req) => String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "?";
+// X-Forwarded-For kan door de bezoeker zélf worden meegestuurd. Met "trust proxy" hieronder
+// vertrouwt Express alleen het adres dat Railway's proxy toevoegt, zodat de rate limiting
+// niet te omzeilen is door een verzonnen header mee te sturen.
+const clientIp = (req) => req.ip || req.socket.remoteAddress || "?";
 
 /* ---- API ---- */
 app.get("/api/health", (req, res) => res.json({ ok: true, db: dbReady }));
@@ -298,18 +357,29 @@ app.post("/api/login", ah(async (req, res) => {
   if (tooMany(ipHits, ip, 15, 5 * 60 * 1000) || tooMany(userHits, uname.toLowerCase(), 10, 10 * 60 * 1000))
     return res.status(429).json({ error: "te-veel-pogingen" });
   const u = await findUser(uname);
-  if (!u) { crypto.scryptSync(String(password || ""), Buffer.from("00000000000000000000000000000000", "hex"), 64); return res.status(401).json({ error: "wrong-credentials" }); } // dummy werk: gelijke tijd of de naam nu bestaat of niet
-  if (!verifyPassword(password || "", u.passwordHash)) return res.status(401).json({ error: "wrong-credentials" });
+  if (!u) { await scryptAsync(String(password || ""), Buffer.from("00000000000000000000000000000000", "hex"), 64, SCRYPT); return res.status(401).json({ error: "wrong-credentials" }); } // dummy werk: gelijke tijd of de naam nu bestaat of niet
+  const v = await verifyPassword(password || "", u.passwordHash);
+  if (!v.ok) return res.status(401).json({ error: "wrong-credentials" });
+  // Hash met oude (lagere) kosten? Stilletjes omzetten. Het wachtwoord zelf verandert niet,
+  // en must_change blijft staan zodat de verplichte eerste wijziging niet wordt overgeslagen.
+  if (v.needsUpgrade) { try { u.passwordHash = await hashPassword(password || ""); await updatePasswordHash(u.username, u.passwordHash); } catch (e) { console.error("Hash-upgrade mislukt:", e.message); } }
   ipHits.delete(ip); userHits.delete(uname.toLowerCase());
-  res.setHeader("Set-Cookie", cookieFor(u));
+  res.setHeader("Set-Cookie", cookieFor(u)); // cookie hangt aan de (mogelijk vernieuwde) hash
   await addLog(u.username, u.displayName, "ingelogd");
   res.json({ ok: true, user: { username: u.username, displayName: u.displayName }, mustChange: u.mustChange, db: dbReady });
 }));
 
 app.post("/api/change-password", requireLogin, ah(async (req, res) => {
   const newPassword = (req.body && req.body.newPassword) || "";
+  const currentPassword = (req.body && req.body.currentPassword) || "";
   if (String(newPassword).length < 8) return res.status(400).json({ error: "te-kort" });
-  const newHash = hashPassword(newPassword);
+  // Bij een verplichte eerste wijziging (must_change) is er nog geen eigen wachtwoord om te bevestigen;
+  // daarna moet het huidige wachtwoord kloppen, zodat een openstaande sessie geen account kan kapen.
+  if (!req.user.mustChange) {
+    const v = await verifyPassword(currentPassword, req.user.passwordHash);
+    if (!v.ok) return res.status(401).json({ error: "huidig-wachtwoord-onjuist" });
+  }
+  const newHash = await hashPassword(newPassword);
   await setUserPassword(req.username, newHash);
   await addLog(req.username, req.user.displayName, "wachtwoord gewijzigd");
   // geef een verse cookie mee (de oude is nu ongeldig omdat hij aan het oude wachtwoord hing)
@@ -419,6 +489,8 @@ app.get("/api/attachments/:id", requireAuth, ah(async (req, res) => {
   res.setHeader("Content-Type", a.mime);
   res.setHeader("Content-Disposition", `inline; filename="${String(a.filename).replace(/"/g, "")}"`);
   res.setHeader("Cache-Control", "private, max-age=3600");
+  // Een geüpload bestand (bv. een PDF met script erin) mag niets kunnen doen op onze eigen domeinnaam.
+  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
   res.send(a.data);
 }));
 
@@ -454,14 +526,19 @@ app.get("/api/activity", requireAuth, ah(async (req, res) => res.json({ activity
 /* ---- Statische frontend + SPA-fallback ---- */
 const dist = path.join(__dirname, "dist");
 const hasBuild = fs.existsSync(path.join(dist, "index.html"));
+// Catch-all als middleware i.p.v. app.get("*"): dat patroon bestaat niet meer in Express 5
+// (padpatronen gaan nu via path-to-regexp v8). Een middleware zonder pad vangt alles wat
+// hierboven niet is afgehandeld — zelfde gedrag, versie-onafhankelijk.
 if (hasBuild) {
   app.use(express.static(dist));
-  app.get("*", (req, res) => {
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
     if (req.path.startsWith("/api")) return res.status(404).json({ error: "not found" });
     res.sendFile(path.join(dist, "index.html"));
   });
 } else {
-  app.get("*", (req, res) => {
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
     if (req.path.startsWith("/api")) return res.status(404).json({ error: "not found" });
     res.status(200).send("<h1>Huishoudboekje</h1><p>De frontend-build (map <code>dist</code>) ontbreekt. Controleer dat <code>npm run build</code> tijdens de deploy is uitgevoerd.</p>");
   });

@@ -15,7 +15,7 @@ async function call(method, url, body) {
 export const me = () => call("GET", "/api/me");
 export const getUsers = () => call("GET", "/api/users");
 export const login = (username, password) => call("POST", "/api/login", { username, password });
-export const changePassword = (newPassword) => call("POST", "/api/change-password", { newPassword });
+export const changePassword = (newPassword, currentPassword) => call("POST", "/api/change-password", { newPassword, currentPassword });
 export const logout = () => call("POST", "/api/logout");
 export const getState = () => call("GET", "/api/state");
 export const putState = (state, rev) => call("PUT", "/api/state", { state, rev });
