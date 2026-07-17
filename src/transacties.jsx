@@ -1,15 +1,16 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { formatEUR, MND_KORT, batchesOf, effYear, effMonth, batchColor, fmtDateTime } from "./lib.js";
-import { settlementsOf, unassignedOf, recoveredFor, expectedBackOf, guessKeyword, unknownSavingsCodes, remainingOf, bundleLabels, ruleMatches, rankSuggestions } from "./financieel.js";
-import { T, Btn, Card, inputStyle, MaandKiezer, Chip, MoneyInput, SectionTitle, Badge, PeriodControl, useIsMobile} from "./ui.jsx";
+import { settlementsOf, unassignedOf, recoveredFor, expectedBackOf, guessKeyword, unknownSavingsCodes, remainingOf, bundleLabels, ruleMatches, rankSuggestions, bundleStats } from "./financieel.js";
+import { T, Btn, Card, inputStyle, MaandKiezer, Chip, MoneyInput, SectionTitle, Badge, PeriodControl} from "./ui.jsx";
 import { ExpectedBackEditor, TX_COLS, TxRow, PostPicker, VermogenHint, SplitEditor, RuleLearn } from "./txrow.jsx";
+import { useHuishoudboekje } from "./store.jsx";
 
 // ---- Transacties-tabblad ----
 // De lijst met filters/zoeken/nalopen, plus de losse gereedschappen eromheen:
 // handmatige transactie, voorschottenpaneel, opschonen en de importcontrole.
 // De regel zelf woont in txrow.jsx.
 
-function DataCleanup({ year, years = [], txCount, onClearRange, onClearYear, onClearAll, onResetAll }) {
+function DataCleanup({ year, years = [], txCount, transactions = [], onClearRange, onClearYear, onClearAll, onResetAll, onClearBatch }) {
   const months = MND_KORT;
   const yearList = (years.length ? years : [year]).map((y) => y.jaartal).sort((a, b) => a - b);
   const [fy, setFy] = useState(year.jaartal), [fm, setFm] = useState(1);
@@ -30,6 +31,21 @@ function DataCleanup({ year, years = [], txCount, onClearRange, onClearYear, onC
     <Card style={{ padding: 16, marginBottom: 14, border: `1px solid #f0dcb8`, background: "#fffdf8" }}>
       <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Gegevens opschonen</div>
       <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 12 }}>Hiermee verwijder je ingelezen transacties. Je begroting, posten en regels blijven staan (tenzij je hieronder "opnieuw beginnen" kiest).</div>
+
+      {(() => {
+        // Laatste import terugdraaien — handig als je net het verkeerde bestand inlas.
+        const batches = batchesOf(transactions);
+        const laatste = batches[0];
+        if (!onClearBatch || !laatste) return null;
+        const wanneer = fmtDateTime(laatste.at);
+        return (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${T.line}` }}>
+            <span style={{ fontSize: 13, color: T.sub, minWidth: 64 }}>Laatste import</span>
+            <span style={{ fontSize: 12.5 }}>{laatste.count} transactie{laatste.count > 1 ? "s" : ""}{wanneer ? ` · ingelezen ${wanneer}` : ""}</span>
+            <ConfirmRow id="batch" label="Verwijder laatste import" onYes={() => onClearBatch(laatste.id)} />
+          </div>
+        );
+      })()}
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
         <span style={{ fontSize: 13, color: T.sub, minWidth: 64 }}>Eén maand</span>
@@ -59,7 +75,7 @@ function DataCleanup({ year, years = [], txCount, onClearRange, onClearYear, onC
   );
 }
 
-function VoorschotPanel({ transactions, categories, onLinkSettle, onUnlinkSettle, onUnsettle, onPatch }) {
+function VoorschotPanel({ transactions, categories, bundles = [], onLinkSettle, onUnlinkSettle, onUnsettle, onPatch, onOpenBundels }) {
   const dt = (iso) => `${iso.slice(8, 10)}-${iso.slice(5, 7)}-${iso.slice(2, 4)}`;
   const catLabel = (t) => (t.allocations || []).map((a) => (categories.find((c) => c.id === a.categoryId) || {}).naam).filter(Boolean).join(", ") || "nog niet ingedeeld";
   const partFor = (inc, advId) => (settlementsOf(inc).find((s) => s.advanceId === advId) || {}).amountCents || 0;
@@ -72,6 +88,25 @@ function VoorschotPanel({ transactions, categories, onLinkSettle, onUnlinkSettle
   return (
     <Card style={{ padding: 16, marginBottom: 14, border: `1px solid ${T.accent}`, background: "#f3f8f6" }}>
       <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Tikkies &amp; voorschotten</div>
+      {(() => {
+        // Gedeelde bundels met een openstaand bedrag horen hier ook: het is precies zo'n tikkie.
+        const open = (bundles || []).map((b) => bundleStats(b, transactions)).filter((st) => (st.people || []).length > 0 && st.open > 0);
+        if (!open.length) return null;
+        return (
+          <div style={{ marginBottom: 12, border: `1px solid ${T.line}`, borderRadius: 8, background: "#fff", padding: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Gedeelde bundels — nog te ontvangen</div>
+            {open.map((st) => (
+              <div key={st.key} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "5px 0", borderTop: `1px solid ${T.line}` }}>
+                <span style={{ fontWeight: 600, fontSize: 13, minWidth: 0 }}>{st.naam}</span>
+                <span style={{ fontSize: 12, color: T.sub }}>{st.people.filter((p) => p.klaar).length}/{st.people.length} betaald · ieders deel <span style={{ fontFamily: T.mono }}>{formatEUR(st.share)}</span></span>
+                <span style={{ flex: 1 }} />
+                <span style={{ fontFamily: T.mono, fontWeight: 700, color: T.warn }}>{formatEUR(st.open)} open</span>
+                {onOpenBundels && <Btn size="sm" variant="ghost" onClick={onOpenBundels} title="naar Uitgaven → Bundels">regel af →</Btn>}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
       <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 12 }}>Markeer bij het verwerken een bedrag waar je een tikkie voor stuurt en geef aan hoeveel je terugverwacht (mag een deel zijn). Komt geld binnen, vink het dan hieronder aan onder de bijbehorende tikkie — ik koppel telkens zoveel als er nog openstaat. <b>Eén binnengekomen bedrag kun je zo over meerdere tikkies verdelen</b> (vink het onder elke tikkie aan). De terugbetaling wordt naar verhouding op dezelfde post(en) geboekt.</div>
 
       {open.length === 0 && <div style={{ fontSize: 13, color: T.sub }}>Geen openstaande tikkies. 👍</div>}
@@ -205,8 +240,8 @@ function OnbekendeSpaarrekeningen({ transactions, categories, onCreateSavings, o
   );
 }
 
-function Transacties({ groups, categories, year, years = [], transactions, rules = [], onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview, preset = null, onPresetConsumed }) {
-  const isMobile = useIsMobile();
+function Transacties({ groups, categories, year, years = [], transactions, rules = [], bundles = [], onOpenBundels, onClearBatch, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview, preset = null, onPresetConsumed }) {
+  const { isMobile } = useHuishoudboekje();
   const [showCleanup, setShowCleanup] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [showVoorschot, setShowVoorschot] = useState(false);
@@ -263,8 +298,8 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
       </div>
       {onCreateSavings && <OnbekendeSpaarrekeningen transactions={transactions} categories={categories} onCreateSavings={onCreateSavings} onLinkSavings={onLinkSavings} />}
       {showManual && <div style={{ marginTop: 12 }}><ManualTxForm onAdd={onAddManual} onClose={() => setShowManual(false)} /></div>}
-      {showVoorschot && <div style={{ marginTop: 12 }}><VoorschotPanel transactions={transactions} categories={categories} onLinkSettle={onLinkSettle} onUnlinkSettle={onUnlinkSettle} onUnsettle={onUnsettle} onPatch={onSaveOne} /></div>}
-      {showCleanup && <div style={{ marginTop: 12 }}><DataCleanup year={year} years={years} txCount={transactions.length} onClearRange={onClearRange} onClearYear={onClearYear} onClearAll={onClearAll} onResetAll={onResetAll} /></div>}
+      {showVoorschot && <div style={{ marginTop: 12 }}><VoorschotPanel transactions={transactions} categories={categories} onLinkSettle={onLinkSettle} onUnlinkSettle={onUnlinkSettle} onUnsettle={onUnsettle} onPatch={onSaveOne} bundles={bundles} onOpenBundels={onOpenBundels} /></div>}
+      {showCleanup && <div style={{ marginTop: 12 }}><DataCleanup year={year} years={years} txCount={transactions.length} transactions={transactions} onClearBatch={onClearBatch} onClearRange={onClearRange} onClearYear={onClearYear} onClearAll={onClearAll} onResetAll={onResetAll} /></div>}
       {reviewing ? (
         <div style={{ marginTop: 12 }}>
           <ImportReview items={teSorterenItems} groups={groups} categories={categories} rules={rules} history={transactions} transactions={transactions} years={years} title={`Transacties ${year.jaartal} nalopen`} onSaveOne={onSaveOne} onAddRule={onAddRule} onClose={() => setReviewing(false)} onOpenTikkies={() => { setShowVoorschot(true); }} />

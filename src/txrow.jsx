@@ -3,7 +3,7 @@ import { useHuishoudboekje } from "./store.jsx";
 import { uploadAttachment, listAttachments, deleteAttachment, attachmentUrl } from "./api.js";
 import { formatEUR, fmtDateTime, batchColor, effMonth, effYear } from "./lib.js";
 import { savingsCatForTx, derivedPotMutation, catAllowed, guessKeyword, rankSuggestions, settlementsOf, unassignedOf } from "./financieel.js";
-import { T, Btn, MoneyInput, inputStyle, CatSelect, Chip, Icon, Toggle, PeriodControl, useIsMobile} from "./ui.jsx";
+import { T, Btn, MoneyInput, inputStyle, CatSelect, Chip, Icon, Toggle, PeriodControl} from "./ui.jsx";
 
 // ---- De transactieregel ----
 // Alles wat een enkele transactie toont en bewerkt: de regel zelf (TxRow), de postkiezer,
@@ -295,8 +295,7 @@ function TaakKnop({ tx }) {
   );
 }
 function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [], newBatchId = null, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne }) {
-  const { attachCounts } = useHuishoudboekje();
-  const isMobile = useIsMobile();
+  const { attachCounts, isMobile } = useHuishoudboekje();
   const [showAttach, setShowAttach] = useState(false);
   const [open, setOpen] = useState(false);
   const [splitting, setSplitting] = useState(false);

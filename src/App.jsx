@@ -43,7 +43,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
   const refreshAttachCounts = useCallback(() => { attachmentCounts().then((r) => setAttachCounts(r.counts || {})).catch(() => {}); }, []);
   useEffect(() => { refreshAttachCounts(); }, [refreshAttachCounts]);
   // Eén gedeelde context i.p.v. dezelfde props overal doorgeven (geen prop-drilling).
-  const ctx = useMemo(() => ({ user, other, tasks, attachCounts, refreshAttachCounts, addTask, toggleTask, removeTask }), [user, other.name, tasks, attachCounts, refreshAttachCounts, addTask, toggleTask, removeTask]);
+  const ctx = useMemo(() => ({ user, other, tasks, attachCounts, refreshAttachCounts, addTask, toggleTask, removeTask, isMobile }), [user, other.name, tasks, attachCounts, refreshAttachCounts, addTask, toggleTask, removeTask, isMobile]);
 
   const year = years.find((y) => y.id === activeYearId) || years[0];
   const catById = useCallback((id) => categories.find((c) => c.id === id), [categories]);
@@ -367,6 +367,17 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
   const toggleTxFlag = (txId) => setState((s) => ({ ...s, transactions: s.transactions.map((t) => (t.id === txId ? { ...t, flagged: !t.flagged } : t)) }));
   const clearYearTransactions = () => { setState((s) => ({ ...s, transactions: s.transactions.filter((t) => effYear(t) !== year.jaartal) })); logAction(`alle transacties van ${year.jaartal} gewist`); };
   const clearTransactionsInRange = (fromKey, toKey) => { setState((s) => ({ ...s, transactions: s.transactions.filter((t) => { const k = effYear(t) * 100 + effMonth(t); return k < fromKey || k > toKey; }) })); logAction("transacties van een periode gewist"); };
+  // Laatste import ongedaan maken: verwijdert precies de transacties van die ene batch.
+  const clearBatch = (batchId) => {
+    if (!batchId) return;
+    setState((s) => ({
+      ...s,
+      transactions: s.transactions.filter((t) => t.batchId !== batchId),
+      // batch stond mogelijk als "nagelopen" gemarkeerd; die vlag heeft nu geen doel meer
+      reviewedBatches: (s.reviewedBatches || []).filter((b) => b !== batchId),
+    }));
+    logAction("laatste import verwijderd");
+  };
   const clearAllTransactions = () => { setState((s) => ({ ...s, transactions: [] })); logAction("alle transacties gewist"); };
   const resetAllKeepRules = () => { setState((s) => { const fresh = buildSeed(); return { ...fresh, rules: s.rules }; }); logAction("opnieuw begonnen (regels behouden)"); };
   const patchTx = (txId, patch) => {
@@ -407,6 +418,82 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
     }) }));
     logAction("verrekening ongedaan gemaakt");
   };
+  // ---- Gedeelde bundels (tikkie) ----
+  // Een bundel bestaat zodra transacties het label dragen; hier hangen we er personen aan.
+  const bundelDef = (s, key) => (s.bundles || []).find((b) => b.key === key);
+  // Groepsgrootte zetten via de deelknop. n = totaal aantal personen INCLUSIEF jou,
+  // dus de personenlijst (de anderen) wordt n-1 lang. Krimpen gooit de laatste namen weg
+  // en ruimt hun betalingskoppelingen op, anders blijft er geld aan een spook hangen.
+  const setBundleSize = (key, n) => {
+    const k = String(key || "").trim().toLowerCase();
+    const anderen = Math.max(0, Math.min(50, Math.round(n) - 1));
+    if (!k) return;
+    setState((s) => {
+      const bestaand = (s.bundles || []).find((b) => b.key === k);
+      const huidig = (bestaand && bestaand.people) || [];
+      let people = huidig.slice(0, anderen);
+      for (let i = people.length; i < anderen; i++) people.push({ id: "bp" + Math.random().toString(36).slice(2, 8), naam: `Persoon ${i + 1}` });
+      const weg = huidig.slice(anderen).map((p) => p.id);
+      const label = (s.transactions.find((t) => ((t.bundle || "").trim().toLowerCase()) === k) || {}).bundle || k;
+      const bundles = bestaand
+        ? (s.bundles || []).map((b) => (b.key === k ? { ...b, people } : b))
+        : [...(s.bundles || []), { key: k, naam: String(label).trim(), people }];
+      const transactions = weg.length === 0 ? s.transactions : s.transactions.map((t) => {
+        const sm = settlementsOf(t);
+        if (!sm.some((x) => x.bundleKey === k && weg.includes(x.personId))) return t;
+        const settlements = sm.filter((x) => !(x.bundleKey === k && weg.includes(x.personId)));
+        return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
+      });
+      return { ...s, bundles, transactions };
+    });
+    logAction("bundel gedeeld door " + Math.round(n));
+  };
+  const renameBundlePerson = (key, personId, naam) => {
+    const k = String(key || "").trim().toLowerCase();
+    setState((s) => ({ ...s, bundles: (s.bundles || []).map((b) => (b.key === k ? { ...b, people: (b.people || []).map((p) => (p.id === personId ? { ...p, naam } : p)) } : b)) }));
+  };
+  // Betaling van één persoon koppelen aan een bundel.
+  const linkBundlePayment = (incomingId, key, personId, amountCents) => {
+    if (!(amountCents > 0)) return;
+    const k = String(key || "").trim().toLowerCase();
+    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
+      if (t.id !== incomingId) return t;
+      const settlements = [...settlementsOf(t).filter((x) => !(x.bundleKey === k && x.personId === personId)), { bundleKey: k, personId, amountCents }];
+      return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
+    }) }));
+    logAction("bundelbetaling gekoppeld");
+  };
+  const unlinkBundlePayment = (incomingId, key, personId) => {
+    const k = String(key || "").trim().toLowerCase();
+    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
+      if (t.id !== incomingId) return t;
+      const settlements = settlementsOf(t).filter((x) => !(x.bundleKey === k && x.personId === personId));
+      return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
+    }) }));
+    logAction("bundelbetaling ontkoppeld");
+  };
+  // Bundel verwijderen = alleen het label weghalen. De transacties zelf blijven staan.
+  const removeBundle = (key) => {
+    const k = String(key || "").trim().toLowerCase();
+    setState((s) => ({
+      ...s,
+      bundles: (s.bundles || []).filter((b) => b.key !== k),
+      transactions: s.transactions.map((t) => {
+        const heeftLabel = ((t.bundle || "").trim().toLowerCase()) === k;
+        const sm = settlementsOf(t);
+        const raakt = sm.some((x) => x.bundleKey === k);
+        if (!heeftLabel && !raakt) return t;
+        const settlements = sm.filter((x) => x.bundleKey !== k);
+        return {
+          ...t,
+          ...(heeftLabel ? { bundle: "" } : {}),
+          ...(raakt ? { settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) } : {}),
+        };
+      }),
+    }));
+    logAction("bundel verwijderd");
+  };
+
   const [reviewKick, setReviewKick] = useState(0);
   const startReview = () => { setTab("transacties"); setReviewKick((k) => k + 1); };
   const commitImport = (txns, newRules) => {
@@ -569,8 +656,8 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
             {tab === "mhome" && <MobileHome bankNow={bankNow} teSorteren={teSorterenBadge} transactions={transactions.filter((t) => effYear(t) === year.jaartal)} tasks={tasks} onStartReview={startReview} onToggleTask={toggleTask} onRemoveTask={removeTask} onOpenTx={(txId) => gotoTransacties({ txId })} />}
             {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthly={derived.monthly} topPostsByMonth={derived.topPostsByMonth} teSorteren={teSorterenBadge} onDrill={gotoTransacties} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} forecastYear={derived.forecastYear} reconciliation={derived.reconciliation} agingAdvances={derived.agingAdvances} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
             {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
-            {tab === "transacties" && <Transacties groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} preset={txPreset} onPresetConsumed={() => setTxPreset(null)} />}
-            {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
+            {tab === "transacties" && <Transacties bundles={state.bundles || []} onClearBatch={clearBatch} onOpenBundels={() => setTab("uitgaven")} groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} preset={txPreset} onPresetConsumed={() => setTxPreset(null)} />}
+            {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} bundles={state.bundles || []} onSetBundleSize={setBundleSize} onRenameBundlePerson={renameBundlePerson} onRemoveBundle={removeBundle} onLinkBundlePayment={linkBundlePayment} onUnlinkBundlePayment={unlinkBundlePayment} />}
             {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} year={year} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
             {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
             {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} history={transactions} onCommit={commitImport} onStartReview={startReview} />}

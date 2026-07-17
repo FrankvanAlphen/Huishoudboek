@@ -11,6 +11,29 @@ const app = express();
 // vastgesteld — niet wat de bezoeker in de header zette.
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+// ---- HTTPS afdwingen ----
+// Railway termineert TLS aan de rand en zet het oorspronkelijke protocol in X-Forwarded-Proto.
+// Kwam een verzoek via http binnen, dan sturen we het meteen door naar https — zó reist een
+// wachtwoord nooit onversleuteld, ook niet bij het allereerste bezoek (vóór HSTS actief is).
+// Lokaal (COOKIE_INSECURE=true) staat dit uit, anders werkt http://localhost niet.
+const FORCE_HTTPS = process.env.COOKIE_INSECURE !== "true";
+// De Host-header komt van de bezoeker. Zonder controle stuurt de redirect mensen naar een
+// door de aanvaller gekozen domein (open redirect). Daarom: alleen een geldige hostnaam, en
+// als PUBLIC_HOST is gezet moet die exact kloppen — dan is de omleiding volledig dichtgetimmerd.
+const PUBLIC_HOST = (process.env.PUBLIC_HOST || "").trim().toLowerCase();
+const hostToegestaan = (h) => {
+  const host = String(h || "").toLowerCase();
+  if (!/^[a-z0-9.-]+(:\d{1,5})?$/.test(host)) return false; // geen /, \r, \n, @ of andere trucs
+  return PUBLIC_HOST ? host === PUBLIC_HOST : true;
+};
+app.use((req, res, next) => {
+  if (FORCE_HTTPS && req.headers["x-forwarded-proto"] === "http") {
+    if (!hostToegestaan(req.headers.host)) return res.status(400).json({ error: "ongeldige-host" });
+    return res.redirect(308, "https://" + req.headers.host + req.originalUrl);
+  }
+  next();
+});
+
 app.use(express.json({ limit: "10mb" }));
 
 /* ---- Beveiligingsheaders ---- */
@@ -32,7 +55,10 @@ app.use((req, res, next) => {
     "form-action 'self'",
     "frame-ancestors 'none'",
   ].join("; "));
-  if (process.env.COOKIE_INSECURE !== "true") res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  if (FORCE_HTTPS) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  // Financiële gegevens mogen nooit op schijf blijven staan (gedeelde computer, proxy-cache).
+  // De bijlage-route zet hierna bewust zijn eigen, mildere Cache-Control.
+  if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
   next();
 });
 
@@ -326,7 +352,7 @@ const requireAuth = ah(async (req, res, next) => {
 });
 
 /* ---- Rem op inlogpogingen: per IP én per gebruikersnaam (tegen wachtwoord-raden) ---- */
-const ipHits = new Map(), userHits = new Map();
+const ipHits = new Map(), userHits = new Map(), pwHits = new Map();
 function tooMany(map, key, max, windowMs) {
   const now = Date.now();
   if (map.size > 1000) for (const [k, v] of map) { if (now - v.ts > windowMs) map.delete(k); } // opruimen: geen onbeperkte groei
@@ -376,8 +402,13 @@ app.post("/api/change-password", requireLogin, ah(async (req, res) => {
   // Bij een verplichte eerste wijziging (must_change) is er nog geen eigen wachtwoord om te bevestigen;
   // daarna moet het huidige wachtwoord kloppen, zodat een openstaande sessie geen account kan kapen.
   if (!req.user.mustChange) {
+    // Zonder rem kan iemand met een gekaapte sessie het huidige wachtwoord onbeperkt raden
+    // en daarmee alsnog het account overnemen. Zelfde rem als bij inloggen.
+    if (tooMany(pwHits, req.username.toLowerCase(), 5, 15 * 60 * 1000))
+      return res.status(429).json({ error: "te-veel-pogingen" });
     const v = await verifyPassword(currentPassword, req.user.passwordHash);
     if (!v.ok) return res.status(401).json({ error: "huidig-wachtwoord-onjuist" });
+    pwHits.delete(req.username.toLowerCase()); // gelukt: teller op nul
   }
   const newHash = await hashPassword(newPassword);
   await setUserPassword(req.username, newHash);
@@ -487,7 +518,11 @@ app.get("/api/attachments/:id", requireAuth, ah(async (req, res) => {
   else { const m = memAttach.find((x) => x.id === id); if (m) a = { filename: m.filename, mime: m.mime, data: m.data }; }
   if (!a) return res.status(404).json({ error: "niet gevonden" });
   res.setHeader("Content-Type", a.mime);
-  res.setHeader("Content-Disposition", `inline; filename="${String(a.filename).replace(/"/g, "")}"`);
+  // Bestandsnamen mogen alleen latin1 in een HTTP-header. Namen als "kwitantie €50.pdf" of
+  // een emoji lieten setHeader crashen (500 — bijlage voorgoed onleesbaar). Daarom: een veilige
+  // ASCII-terugvalnaam plus de echte naam UTF-8-gecodeerd volgens RFC 5987 (filename*).
+  const veiligeNaam = String(a.filename).replace(/[^\x20-\x7E]/g, "_").replace(/["\\;\r\n]/g, "");
+  res.setHeader("Content-Disposition", `inline; filename="${veiligeNaam || "bijlage"}"; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
   res.setHeader("Cache-Control", "private, max-age=3600");
   // Een geüpload bestand (bv. een PDF met script erin) mag niets kunnen doen op onze eigen domeinnaam.
   res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
@@ -512,11 +547,12 @@ app.post("/api/log", requireAuth, ah(async (req, res) => {
 // Debug: zet binnenkomende transactieregels in de server-terminal (zichtbaar in de Railway-logs).
 // Puur voor het nalopen van de import/vermogens-afleiding; slaat niets op.
 app.post("/api/debug-log", requireAuth, ah(async (req, res) => {
-  const label = String((req.body && req.body.label) || "debug").slice(0, 120);
+  const label = String((req.body && req.body.label) || "debug").replace(/[\r\n]+/g, " ").slice(0, 120);
   const lines = Array.isArray(req.body && req.body.lines) ? req.body.lines.slice(0, 500) : [];
   const who = (req.user && req.user.displayName) || req.username;
   console.log(`\n===== DEBUG · ${label} · ${who} · ${new Date().toISOString()} =====`);
-  for (const l of lines) console.log("  " + String(l).slice(0, 400));
+  // regeleindes eruit: anders kan een regel nepregels in het log schrijven (log-injectie)
+  for (const l of lines) console.log("  " + String(l).replace(/[\r\n]+/g, " ").slice(0, 400));
   console.log(`===== einde debug (${lines.length} regel(s)) =====\n`);
   res.json({ ok: true });
 }));

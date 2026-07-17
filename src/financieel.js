@@ -315,14 +315,82 @@ function recoveredFor(advanceId, txns) {
 // Verdeel de allocaties van een binnenkomend bedrag over de gekoppelde voorschotten (netteert per post).
 function allocsFromSettlements(settlements, txns) {
   const out = [];
-  for (const s of settlements || []) { const adv = (txns || []).find((t) => t.id === s.advanceId); if (adv && (adv.allocations || []).length) for (const a of distributeProportional(s.amountCents, adv.allocations)) out.push(a); }
+  for (const s of settlements || []) {
+    // Bundelbetaling: reken het bedrag proportioneel toe aan de posten van de héle bundel,
+    // zodat teruggekregen geld op dezelfde posten landt als de uitgaven van die bundel.
+    if (s.bundleKey) {
+      const alle = [];
+      for (const t of bundleTxns(txns, s.bundleKey)) for (const a of t.allocations || []) alle.push(a);
+      for (const a of distributeProportional(s.amountCents, alle)) out.push(a);
+      continue;
+    }
+    const adv = (txns || []).find((t) => t.id === s.advanceId); if (adv && (adv.allocations || []).length) for (const a of distributeProportional(s.amountCents, adv.allocations)) out.push(a);
+  }
   return out;
 }
 // Verwacht terug te ontvangen bedrag van een voorschot (deel mag); standaard het hele bedrag.
 function expectedBackOf(adv) { return adv && adv.expectedBackCents != null ? adv.expectedBackCents : Math.abs((adv && adv.amountCents) || 0); }
 // Resterend openstaand bedrag van een voorschot.
 function remainingOf(adv, txns) { return expectedBackOf(adv) - recoveredFor(adv.id, txns); }
-// Unieke bundellabels (hoofdletter-ongevoelig ontdubbeld, eerste schrijfwijze behouden).
+// ---- Bundels delen (tikkie) ----
+// Een bundel is een groep transacties met hetzelfde label. Deel je hem, dan wordt het
+// totaal gedeeld door (jij + de anderen); ieders deel is gelijk. Wat de anderen samen
+// verschuldigd zijn, is wat je terugverwacht. Inkomende betalingen koppel je per persoon.
+const bundleKeyOf = (t) => ((t && t.bundle) || "").trim().toLowerCase();
+
+// Alle transacties van één bundel binnen een jaar (jaar = null: alle jaren).
+function bundleTxns(txns, key, jaar = null) {
+  const k = String(key || "").toLowerCase();
+  return (txns || []).filter((t) => bundleKeyOf(t) === k && (jaar == null || effYear(t) === jaar));
+}
+
+// Totaal van de bundel in centen, altijd positief (het is een uitgave die je deelt).
+function bundleTotalCents(txns, key, jaar = null) {
+  return Math.abs(bundleTxns(txns, key, jaar).reduce((s, t) => s + (t.amountCents || 0), 0));
+}
+
+// Wat één ander persoon moet betalen. Tikkie kan geen halve centen, dus rond je het deel
+// naar BOVEN af — precies zoals je het tikkie verstuurt. Jouw eigen deel is wat er overblijft
+// (total - anderen), en is daardoor hooguit een paar cent kleiner dan dat van de rest.
+// Voorbeeld: 500,03 met z'n vijven -> anderen 100,01 elk (= 400,04), jij 99,99.
+function bundleShareCents(totalCents, aantalAnderen) {
+  const n = Math.max(1, (aantalAnderen || 0) + 1); // jij telt altijd mee
+  return Math.ceil(totalCents / n);
+}
+
+// Wat er al binnen is van één persoon in deze bundel.
+function bundlePaidBy(txns, key, personId) {
+  const k = String(key || "").toLowerCase();
+  let sum = 0;
+  for (const t of txns || []) {
+    if (!(t.amountCents > 0)) continue;
+    for (const s of settlementsOf(t)) {
+      if (String(s.bundleKey || "").toLowerCase() === k && s.personId === personId) sum += s.amountCents || 0;
+    }
+  }
+  return sum;
+}
+
+// Volledige stand van een gedeelde bundel: totaal, ieders deel, per persoon betaald/open.
+function bundleStats(bundle, txns, jaar = null) {
+  const key = String((bundle && bundle.key) || "").toLowerCase();
+  const anderen = (bundle && bundle.people) || [];
+  const total = bundleTotalCents(txns, key, jaar);
+  const share = bundleShareCents(total, anderen.length);
+  const people = anderen.map((p) => {
+    const paid = bundlePaidBy(txns, key, p.id);
+    return { ...p, share, paid, open: Math.max(0, share - paid), klaar: paid >= share };
+  });
+  const expectedBack = share * anderen.length;   // jouw eigen deel verwacht je niet terug
+  const received = people.reduce((s, p) => s + p.paid, 0);
+  return {
+    key, naam: (bundle && bundle.naam) || key, total, share, mijnDeel: total - expectedBack,
+    expectedBack, received, open: Math.max(0, expectedBack - received), people,
+    klaar: anderen.length > 0 && received >= expectedBack,
+  };
+}
+
+
 function bundleLabels(txns) {
   const seen = new Map();
   for (const t of txns || []) { const raw = (t.bundle || "").trim(); if (!raw) continue; const k = raw.toLowerCase(); if (!seen.has(k)) seen.set(k, raw); }
@@ -544,4 +612,4 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 /* PAGINA'S                                                              */
 /* ===================================================================== */
 
-export { computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, reconcileImport, matchCondition, ruleMatches, matchSpaarcode, extractOranjeCode, savingsKeyword, extractSavingsAccount, savingsHint, unknownSavingsCodes, savingsCatForTx, derivedPotMutation, potFlows, potMutations, potHistory, debugLogImport, categorize, catAllowed, SUPERMARKETS, detectChain, distributeProportional, settlementsOf, assignedOf, unassignedOf, recoveredFor, allocsFromSettlements, expectedBackOf, remainingOf, bundleLabels, splitCsvLine, extractOmschrijving, parseINGRows, parseINGCsv, SAMPLE_CSV, SLUITPOST_ID, computeSluitpostMonths, applySluitpost, budgetTotals, normName, matchCategoryByName, cellToCents, parseBudgetRows, txYearActuals, KW_STOP, tokenize, guessKeyword, rankSuggestions };
+export { bundleKeyOf, bundleTxns, bundleTotalCents, bundleShareCents, bundlePaidBy, bundleStats, computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, reconcileImport, matchCondition, ruleMatches, matchSpaarcode, extractOranjeCode, savingsKeyword, extractSavingsAccount, savingsHint, unknownSavingsCodes, savingsCatForTx, derivedPotMutation, potFlows, potMutations, potHistory, debugLogImport, categorize, catAllowed, SUPERMARKETS, detectChain, distributeProportional, settlementsOf, assignedOf, unassignedOf, recoveredFor, allocsFromSettlements, expectedBackOf, remainingOf, bundleLabels, splitCsvLine, extractOmschrijving, parseINGRows, parseINGCsv, SAMPLE_CSV, SLUITPOST_ID, computeSluitpostMonths, applySluitpost, budgetTotals, normName, matchCategoryByName, cellToCents, parseBudgetRows, txYearActuals, KW_STOP, tokenize, guessKeyword, rankSuggestions };

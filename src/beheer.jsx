@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { loadXLSX, effYear, norm, dedupHash } from "./lib.js";
-import { reconcileImport, ruleMatches, categorize, parseINGRows, parseINGCsv, SAMPLE_CSV, SLUITPOST_ID } from "./financieel.js";
+import { reconcileImport, ruleMatches, categorize, parseINGRows, parseINGCsv, SLUITPOST_ID } from "./financieel.js";
 import { T, Btn, Card, MoneyInput, Banner, Toggle, SectionTitle, inputStyle } from "./ui.jsx";
 import { Uitgaven } from "./uitgaven.jsx";
 import { Transacties } from "./transacties.jsx";
@@ -268,7 +268,6 @@ function Regels({ rules, categories, groups, transactions = [], onToggle, onDele
 }
 
 function Import({ categories, groups, rules, existingHashes, history = [], onCommit, onStartReview }) {
-  const [text, setText] = useState("");
   const [parsed, setParsed] = useState(null); // { committed, dupCount, errors, autoCount, uncategorized }
   const [phase, setPhase] = useState("upload"); // upload | summary | done
   const [result, setResult] = useState(null);
@@ -307,7 +306,6 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
     }
     processTxns(txns, errors);
   };
-  const run = () => runWith(text);
   const handleFile = async (file) => {
     if (!file) return;
     try {
@@ -319,7 +317,7 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
         runWithRows(rows);
       } else {
         const csv = await file.text();
-        setText(csv); runWith(csv);
+        runWith(csv);
       }
     } catch (e) {
       setParsed({ committed: [], dupCount: 0, errors: ["Kon het bestand niet lezen: " + (e.message || "onbekend")], autoCount: 0, uncategorized: 0 });
@@ -347,21 +345,16 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
         onDragLeave={() => setDrag(false)}
         onDrop={(e) => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]); }}
         onClick={() => fileRef.current && fileRef.current.click()}
-        style={{ border: `2px dashed ${drag ? T.accent : T.line}`, background: drag ? T.accentSoft : T.panel, borderRadius: T.radius, padding: "22px 18px", marginBottom: 14, cursor: "pointer", textAlign: "center" }}
+        style={{ border: `2px dashed ${drag ? T.accent : T.line}`, background: drag ? T.accentSoft : T.panel, borderRadius: T.radius, padding: "34px 18px", marginBottom: 14, cursor: "pointer", textAlign: "center" }}
       >
         <input ref={fileRef} type="file" accept=".csv,.txt,.xlsx,.xls" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
-        <div style={{ fontSize: 14, fontWeight: 600 }}>Sleep je ING-bestand hierheen (CSV of Excel)</div>
-        <div style={{ fontSize: 12, color: T.sub, marginTop: 3 }}>of klik om je gedownloade bestand te kiezen · herkende transacties worden meteen ingedeeld, de rest zet je daarna op Transacties</div>
-      </div>
-      <Card style={{ padding: 16 }}>
-        <div style={{ fontSize: 13, color: T.sub, marginBottom: 8 }}>Of plak de inhoud van je ING-export hieronder.</div>
-        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={6} placeholder="Datum;Naam / Omschrijving;Rekening;Tegenrekening;…"
-          style={{ width: "100%", boxSizing: "border-box", fontFamily: T.mono, fontSize: 12, padding: 10, border: `1px solid ${T.line}`, borderRadius: 7, outline: "none" }} />
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-          <Btn onClick={run} disabled={!text.trim()}>Verwerk</Btn>
-          <Btn variant="secondary" onClick={() => setText(SAMPLE_CSV)}>Laad mijn ING-voorbeeld</Btn>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>Sleep je ING-bestand hierheen</div>
+        <div style={{ fontSize: 12.5, color: T.sub, marginTop: 4 }}>Excel (.xlsx / .xls) of CSV</div>
+        <div style={{ marginTop: 12 }}>
+          <Btn variant="secondary" onClick={(e) => { e.stopPropagation(); fileRef.current && fileRef.current.click(); }}>Kies je gedownloade bestand</Btn>
         </div>
-      </Card>
+        <div style={{ fontSize: 12, color: T.sub, marginTop: 12 }}>Herkende transacties worden meteen ingedeeld; de rest zet je daarna op Transacties.</div>
+      </div>
     </div>
   );
 
@@ -397,7 +390,7 @@ function Import({ categories, groups, rules, existingHashes, history = [], onCom
     <div>
       <SectionTitle>Importeren — klaar</SectionTitle>
       <Banner tone="ok">{result.count} transactie(s) toegevoegd: {result.auto} ingedeeld{result.uncategorized > 0 ? `, ${result.uncategorized} nog toe te kennen op Transacties` : ""}{result.rules ? `, en ${result.rules} nieuwe regel(s) geleerd` : ""}.</Banner>
-      <div style={{ marginTop: 14 }}><Btn variant="secondary" onClick={() => { setText(""); setParsed(null); setResult(null); setPhase("upload"); }}>Nog een bestand importeren</Btn></div>
+      <div style={{ marginTop: 14 }}><Btn variant="secondary" onClick={() => { setParsed(null); setResult(null); setPhase("upload"); }}>Nog een bestand importeren</Btn></div>
     </div>
   );
 }

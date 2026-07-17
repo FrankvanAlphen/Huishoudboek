@@ -29,14 +29,17 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 | `FRANK_TEMP_PW`, `KIMBERLEY_TEMP_PW` | aanbevolen | Startwachtwoorden voor een **lege** database. Niet gezet? Dan genereert de server een willekeurig wachtwoord en zet het eenmalig in het opstartlog. Bestaande accounts worden nooit aangeraakt. |
 | `COOKIE_INSECURE=true` | alleen lokaal | Cookies zonder `Secure`-vlag voor http://localhost. |
 | `DATABASE_SSL_STRICT`, `DATABASE_CA` | optioneel | Volledige certificaatcontrole op de databaseverbinding (nodig bij verbinden buiten Railway's interne netwerk). |
+| `PUBLIC_HOST` | aanbevolen | Je publieke hostnaam (bv. `huishoudboekje.up.railway.app`). Gezet? Dan accepteert de http→https-redirect alleen die host — dat sluit een open redirect via een vervalste Host-header volledig uit. |
 
 ## Security-samenvatting
 
 **Wachtwoorden:** scrypt met willekeurig salt en timing-safe vergelijking; de kosten staan in de hash zelf (`scrypt$N$r$p$salt$hash`, nu N=65536 ≈ 64 MB per poging). Oude hashes (`salt:hash`, Node-standaardkosten) blijven werken en worden bij een geslaagde login stilletjes omgezet naar de zwaardere kosten — niemand raakt buitengesloten. Hashen gebeurt asynchroon, dus inloggen blokkeert de server niet. Bij een onbekende gebruikersnaam wordt hetzelfde werk gedaan (geen enumeratie via responstijd).
 
-**Onderweg / in de browser:** het wachtwoord reist versleuteld via HTTPS (TLS van Railway) — dat is de juiste plek voor die bescherming; client-side hashen zou de hash zélf het wachtwoord maken en voegt niets toe. HSTS dwingt HTTPS af. Sessiecookie: HttpOnly (niet leesbaar voor scripts), SameSite=Strict (blokkeert CSRF), Secure (alleen via HTTPS), HMAC-ondertekend en gebonden aan de wachtwoordhash — wachtwoord wijzigen maakt alle oude sessies ongeldig. Content-Security-Policy staat alleen eigen scripts toe en verbiedt frames (clickjacking), plug-ins en externe verbindingen. React escapet alle tekst; er wordt nergens `innerHTML`/`eval` gebruikt.
+**Onderweg / in de browser:** het wachtwoord reist versleuteld via HTTPS (TLS van Railway). De server **dwingt dit actief af**: kwam een verzoek via http binnen (X-Forwarded-Proto), dan volgt een 308-redirect naar https vóórdat er iets wordt verwerkt — zo reist een wachtwoord nooit onversleuteld, ook niet bij het allereerste bezoek voordat HSTS actief is. Alle API-calls gebruiken relatieve paden en erven dus het https-protocol van de pagina; er staan geen http-URL's in de frontend (geen mixed content). HSTS met `preload` — dat is de juiste plek voor die bescherming; client-side hashen zou de hash zélf het wachtwoord maken en voegt niets toe. HSTS dwingt HTTPS af. Sessiecookie: HttpOnly (niet leesbaar voor scripts), SameSite=Strict (blokkeert CSRF), Secure (alleen via HTTPS), HMAC-ondertekend en gebonden aan de wachtwoordhash — wachtwoord wijzigen maakt alle oude sessies ongeldig. Content-Security-Policy staat alleen eigen scripts toe en verbiedt frames (clickjacking), plug-ins en externe verbindingen. React escapet alle tekst; er wordt nergens `innerHTML`/`eval` gebruikt.
 
 **Bijlagen:** alleen jpeg/png/webp/pdf, max 6 MB, altijd achter login, en geserveerd met `sandbox` + `nosniff` zodat een geüpload bestand nooit actieve code op onze eigen domeinnaam kan uitvoeren.
+
+**Caching:** API-antwoorden krijgen `Cache-Control: no-store` — financiële gegevens blijven nooit op schijf achter. Bijlagen zijn de bewuste uitzondering (`private, max-age=3600`) zodat bonnetjes niet bij elke blik opnieuw laden.
 
 **Op de server:** `trust proxy` staat op 1, zodat het bezoekersadres van Railway's proxy komt en niet uit een zelf meegestuurde `X-Forwarded-For` — anders is de rate limiting te omzeilen. Geen wachtwoorden in de broncode: startwachtwoorden komen uit env of worden willekeurig gegenereerd en eenmalig gelogd. Foutmeldingen naar buiten zijn generiek (geen stack traces); details alleen in het serverlog. Databaseverbinding via SSL met optionele volledige certificaatcontrole (`DATABASE_SSL_STRICT`).
 
@@ -45,6 +48,54 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 **Wachtwoord wijzigen** vraagt om je huidige wachtwoord (behalve bij de verplichte eerste wijziging, als je er nog geen hebt) — zo kan een openstaande sessie geen account kapen.
 
 **Bekende beperkingen (bewust, passend bij een privé-app met twee vaste gebruikers):** het inlogscherm toont de twee namen als keuzelijst (geen geheim, scheelt typen); sessies zijn niet individueel in te trekken (wachtwoord wijzigen trekt ze allemaal in); minimale wachtwoordlengte is 8 tekens; geen self-service wachtwoordherstel; geen MFA. Voor een publieke app met open registratie zou elk van deze punten anders liggen — voor twee bewoners op één huishoudboekje is dit een bewuste afweging.
+
+## Bundels & tikkies
+
+Een **bundel** is een groep transacties met hetzelfde label (`bundle` op de transactie). Je zet het
+label bij het verwerken of via de transactieregel; het datalist-veld stelt bestaande labels voor.
+
+Werkwijze: bundel eerst de uitgaven (bijv. een weekend weg), open dan **Uitgaven → Bundels → Delen**
+en klik op **Delen door 2/3/4/5** — of "meer dan 5…" om zelf een aantal te typen. Dat aantal is
+*inclusief jezelf*; de app maakt de overige personen aan, die je een naam kunt geven.
+
+**Afronding volgt de tikkie-praktijk.** Het deel van de anderen wordt naar BOVEN afgerond op hele
+centen (`Math.ceil`), want dat is het bedrag dat je als tikkie verstuurt. Jouw eigen deel is het
+restant: `totaal − deel × aantal anderen`. Daardoor is jouw deel hooguit een paar cent kleiner dan
+dat van de rest. Voorbeeld: bundel van € 500,03 met z'n vijven → vier tikkies van € 100,01 (samen
+€ 400,04), jouw deel € 99,99. De optelsom klopt altijd exact: jouw deel + terugverwacht = bundeltotaal.
+
+Komt er geld binnen, dan koppel je het via *koppel betaling…* aan de juiste persoon. Deelbetalingen
+mogen: iemand blijft "open" tot zijn deel vol is, en één inkomende transactie kan aan meerdere personen
+in meerdere bundels hangen (`unassignedOf` bewaakt dat je niet meer koppelt dan er binnenkwam).
+Gekoppeld geld wordt **proportioneel over de héle bundel** teruggeboekt, niet volledig tegen één
+uitgave. Bij een bundel van 300 + 100 + 75 + 25 gedeeld door 5 gaat van elke betaling van € 100 dus
+automatisch € 60 naar de 300, € 20 naar de 100, € 15 naar de 75 en € 5 naar de 25. Openstaande bundels
+verschijnen ook in **Transacties → Tikkies**.
+
+**Datamodel.** `state.bundles = [{ key, naam, people: [{ id, naam }] }]`, waarbij `key` het label in
+kleine letters is en `people` alleen de ánderen bevat (jij bent impliciet +1). De bundel zelf bestaat
+door de labels op de transacties; `state.bundles` hangt er alleen de deel-informatie aan. Een label
+zonder personen is gewoon een niet-gedeelde bundel — die blijft werken zoals voorheen. Betalingen zijn
+settlements met `{ bundleKey, personId, amountCents }` naast de bestaande voorschot-vorm
+`{ advanceId, amountCents }`; beide vormen leven naast elkaar in `settlements`.
+
+**Bundel verwijderen** haalt alleen het label bij de transacties weg (en ruimt de koppelingen op).
+De transacties zelf blijven altijd staan.
+
+## Importeren
+
+**Import** accepteert je ING-bestand op twee manieren: slepen in de zone, of klikken op *Kies je
+gedownloade bestand*. Excel (.xlsx/.xls) gaat via `loadXLSX()` → `parseINGRows`; CSV gaat via
+`parseINGCsv`. Beide routes roepen `handleFile` aan, die zelf doorschakelt naar het overzicht — er
+is geen aparte "verwerk"-stap. Het plakvak voor ruwe CSV is vervallen (en daarmee de knop met het
+ING-voorbeeld); `SAMPLE_CSV` staat nog wel in `financieel.js` als documentatie van het verwachte
+kolomformaat.
+
+## Opschonen
+
+**Transacties → Opschonen** kan een maand, een periode, een heel jaar of alles wissen. Bovenaan staat
+**Laatste import**: die verwijdert precies de transacties van de nieuwste batch (`batchId`, nieuwste
+eerst via `batchesOf`) — handig als je net het verkeerde bestand inlas. Oudere batches blijven staan.
 
 ## Bekende dependency-punten
 

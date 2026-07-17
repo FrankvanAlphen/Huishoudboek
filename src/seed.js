@@ -359,6 +359,9 @@ function mergeSeed(state) {
   for (const c of merged.categories) { if (!c.spaarcode) { const sc = seed.categories.find((x) => x.id === c.id); if (sc && sc.spaarcode) c.spaarcode = sc.spaarcode; } }
   if (merged.openingBalanceCents === undefined) merged.openingBalanceCents = null;
   if (merged.reviewedBatches === undefined) merged.reviewedBatches = [];
+  // Gedeelde bundels (tikkie). Bestaande losse bundel-labels op transacties blijven gewoon
+  // werken: die verschijnen als niet-gedeelde bundel tot je er personen aan hangt.
+  merged.bundles = Array.isArray(merged.bundles) ? merged.bundles : [];
   return merged;
 }
 
