@@ -4,6 +4,9 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 
 ## Architectuur
 
+- `tikkies.jsx` — tabblad "Tikkies & delen": losse voorschotten (VoorschotPaneel) én gedeelde bundels (DelenPaneel: delen, herkennen, koppelen). Verhuisd uit uitgaven.jsx en transacties.jsx.
+
+
 | Bestand | Rol |
 |---|---|
 | `server.js` | Express-API + statische hosting van `dist/`. Auth, state-opslag (PostgreSQL of tijdelijk geheugen), snapshots, audit-log, debug-log. |
@@ -54,7 +57,7 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 Een **bundel** is een groep transacties met hetzelfde label (`bundle` op de transactie). Je zet het
 label bij het verwerken of via de transactieregel; het datalist-veld stelt bestaande labels voor.
 
-Werkwijze: bundel eerst de uitgaven (bijv. een weekend weg), open dan **Uitgaven → Bundels → Delen**
+Werkwijze: bundel eerst de uitgaven (bijv. een weekend weg), open dan **Tikkies & delen → Delen**
 en klik op **Delen door 2/3/4/5** — of "meer dan 5…" om zelf een aantal te typen. Dat aantal is
 *inclusief jezelf*; de app maakt de overige personen aan, die je een naam kunt geven.
 
@@ -64,13 +67,29 @@ restant: `totaal − deel × aantal anderen`. Daardoor is jouw deel hooguit een 
 dat van de rest. Voorbeeld: bundel van € 500,03 met z'n vijven → vier tikkies van € 100,01 (samen
 € 400,04), jouw deel € 99,99. De optelsom klopt altijd exact: jouw deel + terugverwacht = bundeltotaal.
 
-Komt er geld binnen, dan koppel je het via *koppel betaling…* aan de juiste persoon. Deelbetalingen
+**Betaalde tikkies worden herkend.** `bundleSuggestions()` zoekt per persoon de meest waarschijnlijke
+binnengekomen betaling en toont die als voorstel; één klik op *Koppel* verrekent hem. Bij meerdere
+voorstellen verschijnt *Koppel alle N*. Score: exact het openstaande bedrag = 3 punten, een paar cent
+ernaast = 1, naam-match = 3; vanaf 3 punten volgt een voorstel, vanaf 6 heet het "Betaald door" in
+plaats van "Mogelijk". Alleen betalingen ná de eerste bundeluitgave tellen mee, en de toewijzing is
+greedy: dezelfde transactie wordt nooit aan twee personen voorgesteld. Voorstellen lopen via `allBundleSuggestions` met één
+gedeelde claim-set, zodat dezelfde binnengekomen betaling nooit bij twee bundels tegelijk wordt
+voorgesteld. Betaalt iemand te veel, dan koppelt de app exact het openstaande deel en toont het
+restant ("… blijft over"). Bij twijfel doet hij liever
+niets — een fout voorstel is duurder dan geen voorstel.
+
+Namen matchen via `nameTokens()` (woorden vanaf 3 letters, dus aanhef en initialen tellen niet mee).
+`cleanPayerName()` maakt van het ING-naamveld een bruikbare naam: "Hr M Lagendijk" → "M Lagendijk",
+"Hr RW Boekestijn,Mw E Knoester" → "RW Boekestijn", "… via ASN Bank Betaalverzoek" → de persoon
+ervoor. Accepteer je een voorstel, dan wordt die naam ingevuld — maar alléén zolang de naam nog de
+door de app verzonnen "Persoon N" is (`isDefaultPersonName`); een naam die jij zelf typte blijft staan.
+
+Komt er geld binnen dat hij niet herkent, dan koppel je het zelf via *kies een betaling…*. Deelbetalingen
 mogen: iemand blijft "open" tot zijn deel vol is, en één inkomende transactie kan aan meerdere personen
 in meerdere bundels hangen (`unassignedOf` bewaakt dat je niet meer koppelt dan er binnenkwam).
 Gekoppeld geld wordt **proportioneel over de héle bundel** teruggeboekt, niet volledig tegen één
 uitgave. Bij een bundel van 300 + 100 + 75 + 25 gedeeld door 5 gaat van elke betaling van € 100 dus
-automatisch € 60 naar de 300, € 20 naar de 100, € 15 naar de 75 en € 5 naar de 25. Openstaande bundels
-verschijnen ook in **Transacties → Tikkies**.
+automatisch € 60 naar de 300, € 20 naar de 100, € 15 naar de 75 en € 5 naar de 25. Voorschotten en bundels staan samen op het tabblad **Tikkies & delen**; de knop op Transacties verwijst ernaartoe.
 
 **Datamodel.** `state.bundles = [{ key, naam, people: [{ id, naam }] }]`, waarbij `key` het label in
 kleine letters is en `people` alleen de ánderen bevat (jij bent impliciet +1). De bundel zelf bestaat
@@ -87,9 +106,7 @@ De transacties zelf blijven altijd staan.
 **Import** accepteert je ING-bestand op twee manieren: slepen in de zone, of klikken op *Kies je
 gedownloade bestand*. Excel (.xlsx/.xls) gaat via `loadXLSX()` → `parseINGRows`; CSV gaat via
 `parseINGCsv`. Beide routes roepen `handleFile` aan, die zelf doorschakelt naar het overzicht — er
-is geen aparte "verwerk"-stap. Het plakvak voor ruwe CSV is vervallen (en daarmee de knop met het
-ING-voorbeeld); `SAMPLE_CSV` staat nog wel in `financieel.js` als documentatie van het verwachte
-kolomformaat.
+is geen aparte "verwerk"-stap. Het plakvak voor ruwe CSV is vervallen (en daarmee de knop met het ING-voorbeeld).
 
 ## Opschonen
 

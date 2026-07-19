@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { me } from "./api.js";
 import { formatEUR, effYear, effMonth, distributeEven, sumMonths, MND_KORT } from "./lib.js";
-import { detectChain, applySluitpost, bundleStats, unassignedOf, bundleShareCents, settlementsOf } from "./financieel.js";
+import { detectChain, applySluitpost, bundleStats, unassignedOf, bundleShareCents, settlementsOf, isDefaultPersonName, bundleSuggestions, cleanPayerName } from "./financieel.js";
 import { T, Btn, Card, Money, MoneyInput, Banner, SectionTitle, MaandKiezer, MaandTabel, ScrollTabel, Chip, Keuze, inputStyle } from "./ui.jsx";
 
 // ---- Uitgaven-tabblad ----
@@ -96,9 +96,9 @@ function TrendView({ categories, actualByCat, names, monthsElapsed }) {
   );
 }
 
-function Uitgaven({ groups, categories, budgets, year, years = [], transactions, onAddCategory, onSetYtd, onSetSubBudget, bundles = [], onSetBundleSize, onRenameBundlePerson, onRemoveBundle, onLinkBundlePayment, onUnlinkBundlePayment }) {
+function Uitgaven({ groups, categories, budgets, year, years = [], transactions, onAddCategory, onSetYtd, onSetSubBudget }) {
   const [expanded, setExpanded] = useState(null);
-  const [view, setView] = useState("analyse"); // startweergave: Begroot vs besteed
+  const [view, setView] = useState("vergelijking"); // startweergave: begroot naast werkelijk
   const [viewYearId, setViewYearId] = useState(year.id);
   const vY = years.find((y) => y.id === viewYearId) || year;
   const monthsElapsed = useMemo(() => { let m = 1; for (const t of transactions) if (effYear(t) === vY.jaartal) m = Math.max(m, effMonth(t)); return m; }, [transactions, vY]);
@@ -147,7 +147,7 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
             </div>
           )}
           <div style={{ display: "inline-flex", border: `1px solid ${T.line}`, borderRadius: 9, overflow: "hidden" }}>
-            {[["analyse", "Begroot vs besteed"], ["maand", "Per maand"], ["blokjes", "Blokjes per post"], ["vergelijking", "Vergelijking"], ["trend", "Trend"], ["winkels", "Per winkel"], ["subposten", "Subposten"], ["bundels", "Bundels"], ["abonnementen", "Abonnementen"]].map(([v, lbl]) => (
+            {[["vergelijking", "Vergelijking"], ["maand", "Per maand"], ["blokjes", "Blokjes per post"], ["trend", "Trend"], ["winkels", "Per winkel"], ["subposten", "Subposten"], ["abonnementen", "Abonnementen"]].map(([v, lbl]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding: "7px 13px", border: "none", background: view === v ? T.accent : T.panel, color: view === v ? "#fff" : T.sub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{lbl}</button>
             ))}
           </div>
@@ -209,11 +209,9 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
         })}
       </Card>
       )}
-      {view === "analyse" && <BegrootBesteed groups={groups} categories={categories} budgets={budgets} year={vY} transactions={transactions} onSetYtd={onSetYtd} />}
       {view === "blokjes" && <BlokjesView groups={groups} categories={categories} blocksByCat={blocksByCat} names={names} />}
       {view === "winkels" && <WinkelMatrix categories={categories} transactions={transactions} vY={vY} />}
       {view === "subposten" && <SubpostView categories={categories} transactions={transactions} vY={vY} monthsElapsed={monthsElapsed} onSetSubBudget={onSetSubBudget} />}
-      {view === "bundels" && <BundelView transactions={transactions} categories={categories} bundles={bundles} onSetSize={onSetBundleSize} onRenamePerson={onRenameBundlePerson} onRemoveBundle={onRemoveBundle} onLinkPayment={onLinkBundlePayment} onUnlinkPayment={onUnlinkBundlePayment} />}
       {view === "maand" && <MaandMatrix groups={groups} categories={categories} lines={lines} actualByCat={actualByCat} />}
       {view === "trend" && <TrendView categories={categories} actualByCat={actualByCat} names={names} monthsElapsed={monthsElapsed} />}
       {view === "abonnementen" && <AbonnementenScan categories={categories} lines={lines} actualByCat={actualByCat} monthsElapsed={monthsElapsed} />}
@@ -240,98 +238,6 @@ function MaandMatrix({ groups, categories, lines, actualByCat }) {
     </ScrollTabel>
   );
 }
-
-function BegrootBesteed({ groups, categories, budgets, year, transactions, onSetYtd }) {
-  const [expanded, setExpanded] = useState(null);
-  const lines = applySluitpost(categories, budgets[year.id] || {});
-  const ytd = year.ytdSeed || {};
-  const agg = useMemo(() => {
-    const m = {};
-    for (const t of transactions) { if (effYear(t) !== year.jaartal) continue; for (const a of (t.allocations || [])) { const k = a.categoryId; if (!m[k]) m[k] = { net: 0, untag: 0, subs: {} }; m[k].net += a.amountCents; if (a.sub) m[k].subs[a.sub] = (m[k].subs[a.sub] || 0) + a.amountCents; else m[k].untag += a.amountCents; } }
-    return m;
-  }, [transactions, year]);
-  const mag = (c, net) => (c.type === "income" ? net : -net); // positief 'besteed/ontvangen'
-  const begrootOf = (c) => Math.abs(sumMonths((lines[c.id] || { months: distributeEven(0) }).months));
-  const importedOf = (c) => mag(c, (agg[c.id] || { net: 0 }).net);
-  const spentOf = (c) => importedOf(c) + (ytd[c.id] || 0);
-  const grid = "minmax(150px, 1.7fr) 90px 104px 90px 96px";
-  const nowrap = { whiteSpace: "nowrap" };
-  const headCell = (t) => <span style={{ textAlign: "right", fontSize: 11, fontWeight: 700, color: T.sub, ...nowrap }}>{t}</span>;
-  const bar = (spent, begroot, income) => { const pct = begroot > 0 ? Math.min(100, Math.round((spent / begroot) * 100)) : (spent > 0 ? 100 : 0); const over = !income && spent > begroot && begroot > 0; const col = income ? (spent >= begroot ? T.pos : T.accent) : (over ? T.neg : T.accent); return <div style={{ height: 5, background: "#eef3f1", borderRadius: 999, overflow: "hidden", marginTop: 5 }}><div style={{ width: `${pct}%`, height: "100%", background: col }} /></div>; };
-  const totals = (cats) => cats.reduce((o, c) => { o.b += begrootOf(c); o.s += spentOf(c); return o; }, { b: 0, s: 0 });
-  return (
-    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-      <div style={{ marginBottom: 12 }}><Banner tone="neutral">Begroot vs besteed voor {year.jaartal}. Vul per post bij <b>t/m heden</b> in wat er dit jaar al is besteed of ontvangen vóór je begon met importeren — dat tel ik op bij de geïmporteerde transacties. Posten met subposten kun je uitklappen voor de verdeling.</Banner></div>
-      <Card style={{ overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: grid, gap: 10, padding: "9px 16px", background: "#eef3f1" }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: T.sub }}>Post</span>
-          {headCell("Begroot")}{headCell("t/m heden")}{headCell("Besteed")}{headCell("Verschil")}
-        </div>
-        {groups.map((g) => {
-          const cats = categories.filter((c) => c.groupId === g.id);
-          if (cats.length === 0) return null;
-          const gt = totals(cats);
-          return (
-            <div key={g.id}>
-              <div style={{ display: "grid", gridTemplateColumns: grid, gap: 10, padding: "8px 16px", background: "#f0f4f3", fontSize: 12, fontWeight: 700, alignItems: "center" }}>
-                <span>{g.naam}</span>
-                <span style={{ textAlign: "right", fontFamily: T.mono, color: T.sub, ...nowrap }}>{formatEUR(gt.b)}</span>
-                <span />
-                <span style={{ textAlign: "right", fontFamily: T.mono, ...nowrap }}>{formatEUR(gt.s)}</span>
-                <span />
-              </div>
-              {cats.map((c) => {
-                const b = begrootOf(c), s = spentOf(c), income = c.type === "income";
-                const verschil = income ? s - b : b - s;
-                const subs = c.subs || [];
-                const isOpen = expanded === c.id;
-                const a = agg[c.id] || { net: 0, untag: 0, subs: {} };
-                return (
-                  <div key={c.id} style={{ borderTop: `1px solid ${T.line}` }}>
-                    <div style={{ padding: "8px 16px" }}>
-                      <div style={{ display: "grid", gridTemplateColumns: grid, gap: 10, alignItems: "center" }}>
-                        <span style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                          {subs.length > 0 ? <button onClick={() => setExpanded(isOpen ? null : c.id)} style={{ border: "none", background: "transparent", cursor: "pointer", color: T.sub, padding: 0, fontSize: 11 }}>{isOpen ? "▾" : "▸"}</button> : <span style={{ width: 11 }} />}
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.naam.split(":")[0]}</span>
-                        </span>
-                        <span style={{ textAlign: "right" }}><Money cents={b} muted /></span>
-                        <span style={{ textAlign: "right" }}><MoneyInput cents={ytd[c.id] || 0} width={96} onChange={(v) => onSetYtd(year.id, c.id, v)} /></span>
-                        <span style={{ textAlign: "right" }}><Money cents={s} /></span>
-                        <span style={{ textAlign: "right", fontFamily: T.mono, fontVariantNumeric: "tabular-nums", fontSize: 13, color: verschil >= 0 ? T.pos : T.neg, ...nowrap }}>{verschil >= 0 ? "+ " : "− "}{formatEUR(Math.abs(verschil))}</span>
-                      </div>
-                      {bar(s, b, income)}
-                    </div>
-                    {isOpen && subs.length > 0 && (
-                      <div style={{ padding: "2px 16px 12px 33px", background: "#fafcfb" }}>
-                        {subs.map((sname) => { const sv = mag(c, a.subs[sname] || 0); return (
-                          <div key={sname} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "3px 0" }}>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{sname}</span>
-                            <span style={{ fontFamily: T.mono, ...nowrap }}>{formatEUR(sv)}</span>
-                          </div>
-                        ); })}
-                        {mag(c, a.untag) !== 0 && (
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "3px 0", color: T.sub, fontStyle: "italic" }}>
-                            <span>— zonder subpost —</span><span style={{ fontFamily: T.mono, ...nowrap }}>{formatEUR(mag(c, a.untag))}</span>
-                          </div>
-                        )}
-                        {(ytd[c.id] || 0) !== 0 && (
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "3px 0", color: T.sub }}>
-                            <span>t/m heden (ingevoerd)</span><span style={{ fontFamily: T.mono, ...nowrap }}>{formatEUR(ytd[c.id] || 0)}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })}
-      </Card>
-    </div>
-  );
-}
-
 function WinkelMatrix({ categories, transactions, vY }) {
   const superCats = categories.filter((c) => /boodschap|supermarkt|speciaalzaak|drogist/i.test(c.naam) && c.type !== "income");
   const superIds = new Set(superCats.map((c) => c.id));
@@ -402,138 +308,6 @@ function SubpostView({ categories, transactions, vY, monthsElapsed = 12, onSetSu
   );
 }
 
-function BundelView({ transactions, categories, bundles = [], onSetSize, onRenamePerson, onRemoveBundle, onLinkPayment, onUnlinkPayment }) {
-  const [open, setOpen] = useState("");        // welke bundel is uitgeklapt voor delen
-  const [eigenAantal, setEigenAantal] = useState("");   // "meer dan 5": zelf een aantal invullen
-  const [bevestig, setBevestig] = useState(""); // welke bundel vraagt om bevestiging van verwijderen
-
-  // Bundels komen uit de labels op transacties; de deel-informatie hangt er los aan.
-  const byBundle = {};
-  for (const t of transactions) {
-    const raw = (t.bundle || "").trim();
-    if (!raw) continue;
-    const k = raw.toLowerCase();
-    if (!byBundle[k]) byBundle[k] = { key: k, naam: raw, total: 0, items: [] };
-    byBundle[k].total += t.amountCents;
-    byBundle[k].items.push(t);
-  }
-  const lijst = Object.values(byBundle).map((d) => {
-    const def = bundles.find((b) => b.key === d.key) || { key: d.key, naam: d.naam, people: [] };
-    return { ...d, def, stats: bundleStats(def, transactions), items: d.items.slice().sort((a, b) => (a.date < b.date ? -1 : 1)) };
-  }).sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
-
-  if (lijst.length === 0) return <Card style={{ padding: 18 }}><div style={{ fontSize: 13, color: T.sub }}>Nog geen bundels. Geef transacties hetzelfde bundel-label (bij het verwerken of via de transactieregel) om ze samen te tellen en te delen.</div></Card>;
-
-  // Inkomende betalingen die nog nergens aan hangen: kandidaten om aan een persoon te koppelen.
-  const kandidaten = transactions.filter((t) => t.amountCents > 0 && unassignedOf(t) > 0).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 12);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ fontSize: 12, color: T.sub }}>Bundels tellen transacties met hetzelfde label bij elkaar op. Deel je een bundel, dan wordt het totaal gelijk verdeeld over jou en de anderen — je ziet per persoon wat er nog open staat.</div>
-      {lijst.map((b) => {
-        const st = b.stats;
-        const gedeeld = (b.def.people || []).length > 0;
-        const isOpen = open === b.key;
-        return (
-          <Card key={b.key} style={{ overflow: "hidden" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "#eef3f1", gap: 10, flexWrap: "wrap" }}>
-              <span style={{ fontWeight: 700, fontSize: 14, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{b.naam}</span>
-              <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ fontFamily: T.mono, fontWeight: 800, fontSize: 15, color: b.total < 0 ? T.neg : T.pos }}>{formatEUR(b.total)}</span>
-                <Btn size="sm" variant={isOpen ? "secondary" : "ghost"} onClick={() => { setOpen(isOpen ? "" : b.key); setBevestig(""); }}>{gedeeld ? "Delen ▾" : "Delen…"}</Btn>
-              </span>
-            </div>
-
-            {gedeeld && (
-              <div style={{ padding: "8px 14px", borderTop: `1px solid ${T.line}`, background: st.klaar ? "#f2f9f4" : "#fffdf5", display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5 }}>
-                <span>Ieders deel: <b style={{ fontFamily: T.mono }}>{formatEUR(st.share)}</b> <span style={{ color: T.sub }}>({(b.def.people || []).length + 1} personen)</span></span>
-                <span>Jouw deel: <b style={{ fontFamily: T.mono }}>{formatEUR(st.mijnDeel)}</b></span>
-                <span>Terugverwacht: <b style={{ fontFamily: T.mono }}>{formatEUR(st.expectedBack)}</b></span>
-                {st.klaar ? <span style={{ color: T.pos, fontWeight: 700 }}>✓ helemaal binnen</span>
-                          : <span style={{ color: T.warn, fontWeight: 700 }}>nog open: <span style={{ fontFamily: T.mono }}>{formatEUR(st.open)}</span></span>}
-              </div>
-            )}
-
-            {isOpen && (
-              <div style={{ padding: "12px 14px", borderTop: `1px solid ${T.line}`, display: "flex", flexDirection: "column", gap: 10 }}>
-                {(() => {
-                  const aantal = (b.def.people || []).length + 1;   // totaal aantal personen incl. jij
-                  const deel = bundleShareCents(Math.abs(b.total), (b.def.people || []).length);
-                  const mijn = Math.abs(b.total) - deel * (aantal - 1);
-                  return (
-                    <>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 13, color: T.sub }}>Delen door</span>
-                        {[2, 3, 4, 5].map((k) => (
-                          <Btn key={k} size="sm" variant={aantal === k ? "secondary" : "ghost"} onClick={() => { setEigenAantal(""); onSetSize(b.key, k); }}>{k}</Btn>
-                        ))}
-                        <Btn size="sm" variant={aantal > 5 ? "secondary" : "ghost"} onClick={() => setEigenAantal(String(aantal > 5 ? aantal : 6))}>meer dan 5…</Btn>
-                        {eigenAantal !== "" && (
-                          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                            <input type="number" min="2" max="50" value={eigenAantal} onChange={(e) => setEigenAantal(e.target.value)}
-                                   onKeyDown={(e) => { if (e.key === "Enter" && Number(eigenAantal) >= 2) { onSetSize(b.key, Number(eigenAantal)); setEigenAantal(""); } }}
-                                   style={{ ...inputStyle, width: 72 }} />
-                            <Btn size="sm" onClick={() => { if (Number(eigenAantal) >= 2) { onSetSize(b.key, Number(eigenAantal)); setEigenAantal(""); } }}>Zet</Btn>
-                          </span>
-                        )}
-                        <span style={{ fontSize: 12, color: T.sub }}>personen, jij meegerekend</span>
-                      </div>
-                      {aantal > 1 && (
-                        <div style={{ fontSize: 12.5, background: "#f3f8f6", border: `1px solid ${T.line}`, borderRadius: 7, padding: "7px 9px" }}>
-                          Stuur elk van de {aantal - 1} ander{aantal - 1 > 1 ? "en" : ""} een tikkie van <b style={{ fontFamily: T.mono, fontSize: 14 }}>{formatEUR(deel)}</b>. Jouw eigen deel is <b style={{ fontFamily: T.mono }}>{formatEUR(mijn)}</b>{mijn !== deel ? <span style={{ color: T.sub }}> — door het afronden van de tikkie een paar cent minder dan de rest.</span> : null}
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-                {(b.def.people || []).map((p) => {
-                  const ps = st.people.find((x) => x.id === p.id) || { paid: 0, open: 0, share: 0, klaar: false };
-                  return (
-                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "6px 8px", border: `1px solid ${T.line}`, borderRadius: 7, background: ps.klaar ? "#f2f9f4" : "#fff" }}>
-                      <input value={p.naam} onChange={(e) => onRenamePerson && onRenamePerson(b.key, p.id, e.target.value)}
-                             placeholder="naam" style={{ ...inputStyle, width: 118, fontWeight: 600, fontSize: 13 }} />
-                      <span style={{ fontSize: 12, fontFamily: T.mono, color: T.sub }}>{formatEUR(ps.paid)} / {formatEUR(ps.share)}</span>
-                      {ps.klaar ? <Chip active size="sm" tone="solid">betaald ✓</Chip> : <Chip size="sm" title="nog niet (volledig) betaald">open {formatEUR(ps.open)}</Chip>}
-                      <span style={{ flex: 1 }} />
-                      {!ps.klaar && kandidaten.length > 0 && onLinkPayment && (
-                        <Keuze value="" onChange={(v) => { if (!v) return; const inc = transactions.find((t) => t.id === v); if (inc) onLinkPayment(inc.id, b.key, p.id, Math.min(ps.open, unassignedOf(inc))); }}
-                               opties={[{ value: "", label: "koppel betaling…" }, ...kandidaten.map((t) => ({ value: t.id, label: `${t.date.slice(8, 10)}-${t.date.slice(5, 7)} ${t.name} · ${formatEUR(unassignedOf(t))}` }))]} />
-                      )}
-                      {ps.paid > 0 && onUnlinkPayment && (
-                        <Btn size="sm" variant="ghost" title="koppeling(en) van deze persoon ongedaan maken"
-                             onClick={() => transactions.filter((t) => settlementsOf(t).some((x) => x.bundleKey === b.key && x.personId === p.id)).forEach((t) => onUnlinkPayment(t.id, b.key, p.id))}>↺</Btn>
-                      )}
-                    </div>
-                  );
-                })}
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <span style={{ flex: 1 }} />
-                  {onRemoveBundle && (bevestig === b.key
-                    ? <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <span style={{ fontSize: 12, color: T.warn }}>Label bij {b.items.length} transactie{b.items.length > 1 ? "s" : ""} weghalen? De transacties blijven staan.</span>
-                        <Btn size="sm" variant="danger" onClick={() => { onRemoveBundle(b.key); setBevestig(""); setOpen(""); }}>Ja, verwijder</Btn>
-                        <Btn size="sm" variant="ghost" onClick={() => setBevestig("")}>Nee</Btn>
-                      </span>
-                    : <Btn size="sm" variant="ghost" onClick={() => setBevestig(b.key)}>Bundel verwijderen</Btn>)}
-                </div>
-              </div>
-            )}
-
-            {b.items.map((t) => { const cat = (t.allocations || []).map((a) => (categories.find((c) => c.id === a.categoryId) || {}).naam).filter(Boolean).join(" + ");
-              return (
-                <div key={t.id} style={{ display: "grid", gridTemplateColumns: "78px 1fr auto", gap: 10, alignItems: "center", padding: "7px 14px", borderTop: `1px solid ${T.line}`, fontSize: 12.5 }}>
-                  <span style={{ fontFamily: T.mono, color: T.sub }}>{t.date.slice(8, 10)}-{t.date.slice(5, 7)}-{t.date.slice(2, 4)}</span>
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}{cat ? ` · ${cat}` : ""}</span>
-                  <span style={{ fontFamily: T.mono, color: t.amountCents < 0 ? T.neg : T.pos }}>{formatEUR(t.amountCents)}</span>
-                </div>
-              ); })}
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
-
 function BlokjesView({ groups, categories, blocksByCat, names }) {
   const dayLabel = (iso) => `${Number(iso.slice(8, 10))} ${names[Number(iso.slice(5, 7)) - 1]}`;
   const [fMaand, setFMaand] = useState(0); // 0 = hele jaar
@@ -584,4 +358,4 @@ function BlokjesView({ groups, categories, blocksByCat, names }) {
   );
 }
 
-export { AbonnementenScan, Sparkline, TrendView, Uitgaven, MaandMatrix, BegrootBesteed, WinkelMatrix, SubpostView, BundelView, BlokjesView };
+export { AbonnementenScan, Sparkline, TrendView, Uitgaven, MaandMatrix, WinkelMatrix, SubpostView, BlokjesView };

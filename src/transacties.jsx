@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { formatEUR, MND_KORT, batchesOf, effYear, effMonth, batchColor, fmtDateTime } from "./lib.js";
-import { settlementsOf, unassignedOf, recoveredFor, expectedBackOf, guessKeyword, unknownSavingsCodes, remainingOf, bundleLabels, ruleMatches, rankSuggestions, bundleStats } from "./financieel.js";
+import { settlementsOf, unassignedOf, guessKeyword, unknownSavingsCodes, remainingOf, bundleLabels, ruleMatches, rankSuggestions, bundleStats } from "./financieel.js";
 import { T, Btn, Card, inputStyle, MaandKiezer, Chip, MoneyInput, SectionTitle, Badge, PeriodControl} from "./ui.jsx";
 import { ExpectedBackEditor, TX_COLS, TxRow, PostPicker, VermogenHint, SplitEditor, RuleLearn } from "./txrow.jsx";
 import { useHuishoudboekje } from "./store.jsx";
@@ -71,95 +71,6 @@ function DataCleanup({ year, years = [], txCount, transactions = [], onClearRang
       </div>
       {confirm === "reset" && <div style={{ fontSize: 12, color: T.neg, marginTop: 8 }}>Dit wist transacties, begrotingsbedragen, startsaldo en spaarsaldi en zet de posten terug naar de standaard. Je <b>regels</b> en <b>inlogaccounts</b> blijven.</div>}
       <div style={{ fontSize: 12, color: T.sub, marginTop: 10 }}>Op dit moment {txCount} transactie(s) in totaal.</div>
-    </Card>
-  );
-}
-
-function VoorschotPanel({ transactions, categories, bundles = [], onLinkSettle, onUnlinkSettle, onUnsettle, onPatch, onOpenBundels }) {
-  const dt = (iso) => `${iso.slice(8, 10)}-${iso.slice(5, 7)}-${iso.slice(2, 4)}`;
-  const catLabel = (t) => (t.allocations || []).map((a) => (categories.find((c) => c.id === a.categoryId) || {}).naam).filter(Boolean).join(", ") || "nog niet ingedeeld";
-  const partFor = (inc, advId) => (settlementsOf(inc).find((s) => s.advanceId === advId) || {}).amountCents || 0;
-  const linkedTo = (advId) => transactions.filter((t) => t.amountCents > 0 && settlementsOf(t).some((s) => s.advanceId === advId)).sort((a, b) => (a.date < b.date ? -1 : 1));
-  const advances = transactions.filter((t) => t.advance).map((adv) => { const owed = expectedBackOf(adv); const recovered = recoveredFor(adv.id, transactions); return { adv, owed, recovered, remaining: owed - recovered, applied: linkedTo(adv.id) }; });
-  const open = advances.filter((a) => a.remaining > 0).sort((a, b) => (a.adv.date < b.adv.date ? 1 : -1));
-  const done = advances.filter((a) => a.remaining <= 0).sort((a, b) => (a.adv.date < b.adv.date ? 1 : -1));
-  const candidatesFor = (a) => transactions.filter((t) => t.amountCents > 0 && t.id !== a.adv.id && t.date >= a.adv.date && unassignedOf(t) > 0 && !settlementsOf(t).some((s) => s.advanceId === a.adv.id)).sort((x, y) => Math.abs(a.remaining - unassignedOf(x)) - Math.abs(a.remaining - unassignedOf(y)) || (x.date < y.date ? -1 : 1));
-  const toggle = (a, inc, on) => { if (on) { onUnlinkSettle(inc.id, a.adv.id); } else { const amt = Math.min(a.remaining, unassignedOf(inc)); if (amt > 0) onLinkSettle(inc.id, a.adv.id, amt); } };
-  return (
-    <Card style={{ padding: 16, marginBottom: 14, border: `1px solid ${T.accent}`, background: "#f3f8f6" }}>
-      <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Tikkies &amp; voorschotten</div>
-      {(() => {
-        // Gedeelde bundels met een openstaand bedrag horen hier ook: het is precies zo'n tikkie.
-        const open = (bundles || []).map((b) => bundleStats(b, transactions)).filter((st) => (st.people || []).length > 0 && st.open > 0);
-        if (!open.length) return null;
-        return (
-          <div style={{ marginBottom: 12, border: `1px solid ${T.line}`, borderRadius: 8, background: "#fff", padding: 10 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Gedeelde bundels — nog te ontvangen</div>
-            {open.map((st) => (
-              <div key={st.key} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "5px 0", borderTop: `1px solid ${T.line}` }}>
-                <span style={{ fontWeight: 600, fontSize: 13, minWidth: 0 }}>{st.naam}</span>
-                <span style={{ fontSize: 12, color: T.sub }}>{st.people.filter((p) => p.klaar).length}/{st.people.length} betaald · ieders deel <span style={{ fontFamily: T.mono }}>{formatEUR(st.share)}</span></span>
-                <span style={{ flex: 1 }} />
-                <span style={{ fontFamily: T.mono, fontWeight: 700, color: T.warn }}>{formatEUR(st.open)} open</span>
-                {onOpenBundels && <Btn size="sm" variant="ghost" onClick={onOpenBundels} title="naar Uitgaven → Bundels">regel af →</Btn>}
-              </div>
-            ))}
-          </div>
-        );
-      })()}
-      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 12 }}>Markeer bij het verwerken een bedrag waar je een tikkie voor stuurt en geef aan hoeveel je terugverwacht (mag een deel zijn). Komt geld binnen, vink het dan hieronder aan onder de bijbehorende tikkie — ik koppel telkens zoveel als er nog openstaat. <b>Eén binnengekomen bedrag kun je zo over meerdere tikkies verdelen</b> (vink het onder elke tikkie aan). De terugbetaling wordt naar verhouding op dezelfde post(en) geboekt.</div>
-
-      {open.length === 0 && <div style={{ fontSize: 13, color: T.sub }}>Geen openstaande tikkies. 👍</div>}
-      {open.map((a) => {
-        const cands = candidatesFor(a).slice(0, 10);
-        const rows = [...a.applied.map((inc) => ({ inc, on: true })), ...cands.map((inc) => ({ inc, on: false }))];
-        return (
-          <div key={a.adv.id} style={{ border: `1px solid ${T.line}`, borderRadius: 8, padding: 10, marginBottom: 8, background: "#fff" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{dt(a.adv.date)} · {a.adv.name}</div>
-                <div style={{ fontSize: 12, color: T.sub }}>{catLabel(a.adv)} · {a.recovered > 0 ? <>al terug <b>{formatEUR(a.recovered)}</b> · nog open <b style={{ color: T.warn }}>{formatEUR(a.remaining)}</b></> : <>verwacht terug <b>{formatEUR(a.owed)}</b></>}</div>
-              </div>
-              <span style={{ fontFamily: T.mono, fontWeight: 700, color: a.adv.amountCents < 0 ? T.neg : T.pos, flexShrink: 0 }}>{formatEUR(a.adv.amountCents)}</span>
-            </div>
-            {(a.adv.allocations || []).length === 0 && <div style={{ fontSize: 11.5, color: T.warn, marginTop: 5 }}>Tip: geef deze uitgave eerst een post, dan boekt de terugbetaling automatisch op de juiste plek.</div>}
-            {onPatch && a.recovered === 0 && <div style={{ marginTop: 6 }}><ExpectedBackEditor amountCents={a.adv.amountCents} value={a.owed} onChange={(v) => onPatch(a.adv.id, { expectedBackCents: v })} /></div>}
-            <div style={{ marginTop: 8 }}>
-              {rows.length === 0 ? <div style={{ fontSize: 12, color: T.warn }}>Nog geen binnengekomen bedragen om te koppelen. Zodra geld binnen is, kun je 'm hier aanvinken.</div> : (
-                <>
-                  <div style={{ fontSize: 12, color: T.sub, marginBottom: 5 }}>Vink aan welk binnengekomen geld bij deze tikkie hoort — dichtstbijzijnde eerst:</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                    {rows.map(({ inc, on }) => { const part = partFor(inc, a.adv.id); const vrij = unassignedOf(inc); const full = Math.abs(inc.amountCents); return (
-                      <label key={inc.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 9px", background: on ? "#eef7f1" : "#f7faf9", border: `1px solid ${on ? T.accent : T.line}`, borderRadius: 7, cursor: "pointer" }}>
-                        <input type="checkbox" checked={on} onChange={() => toggle(a, inc, on)} />
-                        <span style={{ fontSize: 12.5, minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{dt(inc.date)} · {inc.name}{on && part !== full ? <span style={{ color: T.sub }}> · {formatEUR(part)} hiervan</span> : !on && vrij !== full ? <span style={{ color: T.sub }}> · nog {formatEUR(vrij)} vrij</span> : null}</span>
-                        <span style={{ fontFamily: T.mono, color: T.pos, flexShrink: 0 }}>{formatEUR(inc.amountCents)}</span>
-                      </label>
-                    ); })}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        );
-      })}
-
-      {done.length > 0 && (
-        <div style={{ marginTop: 12, borderTop: `1px solid ${T.line}`, paddingTop: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: T.sub, marginBottom: 6 }}>Volledig verrekend</div>
-          {done.map((a) => (
-            <div key={a.adv.id} style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600 }}>{dt(a.adv.date)} · {a.adv.name} · {formatEUR(a.owed)}</div>
-              <div style={{ paddingLeft: 4 }}>{a.applied.map((inc) => { const part = partFor(inc, a.adv.id); const full = Math.abs(inc.amountCents); return (
-                <div key={inc.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", fontSize: 12, padding: "3px 0", flexWrap: "wrap" }}>
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", color: T.pos }}>✓ {dt(inc.date)} · {inc.name} · {formatEUR(part)}{part !== full ? <span style={{ color: T.sub }}> (van {formatEUR(full)})</span> : null}</span>
-                  <button onClick={() => onUnlinkSettle(inc.id, a.adv.id)} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 12, fontWeight: 600, flexShrink: 0 }}>ontkoppel</button>
-                </div>
-              ); })}</div>
-            </div>
-          ))}
-        </div>
-      )}
     </Card>
   );
 }
@@ -240,11 +151,10 @@ function OnbekendeSpaarrekeningen({ transactions, categories, onCreateSavings, o
   );
 }
 
-function Transacties({ groups, categories, year, years = [], transactions, rules = [], bundles = [], onOpenBundels, onClearBatch, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview, preset = null, onPresetConsumed }) {
+function Transacties({ groups, categories, year, years = [], transactions, rules = [], onOpenTikkies, onClearBatch, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview, preset = null, onPresetConsumed }) {
   const { isMobile } = useHuishoudboekje();
   const [showCleanup, setShowCleanup] = useState(false);
   const [showManual, setShowManual] = useState(false);
-  const [showVoorschot, setShowVoorschot] = useState(false);
   const [batchFilter, setBatchFilter] = useState(null);
   const batches = useMemo(() => batchesOf(transactions), [transactions]);
   const newestBatch = batches[0] || null;
@@ -292,17 +202,16 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {teSorteren > 0 && !reviewing && <Btn size="sm" onClick={() => setReviewing(true)}>▶ Nalopen ({teSorteren})</Btn>}
           {onAddManual && <Btn variant={showManual ? "secondary" : "ghost"} size="sm" onClick={() => { setShowManual((s) => !s); setShowCleanup(false); setShowVoorschot(false); }}>{showManual ? "Sluiten" : "+ Losse transactie"}</Btn>}
-          {onLinkSettle && <Btn variant={showVoorschot ? "secondary" : "ghost"} size="sm" onClick={() => { setShowVoorschot((s) => !s); setShowManual(false); setShowCleanup(false); }}>{showVoorschot ? "Sluiten" : `Tikkies${openAdvances ? ` (${openAdvances})` : ""}`}</Btn>}
+          {onOpenTikkies && <Btn variant="ghost" size="sm" onClick={onOpenTikkies}>{`Tikkies & delen${openAdvances ? ` (${openAdvances})` : ""} →`}</Btn>}
           {(onClearRange || onClearYear) && <Btn variant={showCleanup ? "secondary" : "ghost"} size="sm" onClick={() => { setShowCleanup((s) => !s); setShowManual(false); setShowVoorschot(false); }}>{showCleanup ? "Opschonen sluiten" : "Opschonen / wissen"}</Btn>}
         </div>
       </div>
       {onCreateSavings && <OnbekendeSpaarrekeningen transactions={transactions} categories={categories} onCreateSavings={onCreateSavings} onLinkSavings={onLinkSavings} />}
       {showManual && <div style={{ marginTop: 12 }}><ManualTxForm onAdd={onAddManual} onClose={() => setShowManual(false)} /></div>}
-      {showVoorschot && <div style={{ marginTop: 12 }}><VoorschotPanel transactions={transactions} categories={categories} onLinkSettle={onLinkSettle} onUnlinkSettle={onUnlinkSettle} onUnsettle={onUnsettle} onPatch={onSaveOne} bundles={bundles} onOpenBundels={onOpenBundels} /></div>}
       {showCleanup && <div style={{ marginTop: 12 }}><DataCleanup year={year} years={years} txCount={transactions.length} transactions={transactions} onClearBatch={onClearBatch} onClearRange={onClearRange} onClearYear={onClearYear} onClearAll={onClearAll} onResetAll={onResetAll} /></div>}
       {reviewing ? (
         <div style={{ marginTop: 12 }}>
-          <ImportReview items={teSorterenItems} groups={groups} categories={categories} rules={rules} history={transactions} transactions={transactions} years={years} title={`Transacties ${year.jaartal} nalopen`} onSaveOne={onSaveOne} onAddRule={onAddRule} onClose={() => setReviewing(false)} onOpenTikkies={() => { setShowVoorschot(true); }} />
+          <ImportReview items={teSorterenItems} groups={groups} categories={categories} rules={rules} history={transactions} transactions={transactions} years={years} title={`Transacties ${year.jaartal} nalopen`} onSaveOne={onSaveOne} onAddRule={onAddRule} onClose={() => setReviewing(false)} onOpenTikkies={onOpenTikkies} />
         </div>
       ) : (
       <>
@@ -542,4 +451,4 @@ function ImportReview({ items, groups, categories, rules = [], history = [], tra
 
 /* ===================================================================== APP */
 
-export { DataCleanup, VoorschotPanel, ManualTxForm, UnknownSavingsRow, OnbekendeSpaarrekeningen, Transacties, ImportReview };
+export { DataCleanup, ManualTxForm, UnknownSavingsRow, OnbekendeSpaarrekeningen, Transacties, ImportReview };

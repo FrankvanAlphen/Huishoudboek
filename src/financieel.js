@@ -390,6 +390,78 @@ function bundleStats(bundle, txns, jaar = null) {
   };
 }
 
+// ---- Betaalde tikkies herkennen ----
+// Bij ING staat de naam van de betaler in het naamveld ("Hr M Lagendijk", soms
+// "Hr RW Boekestijn,Mw E Knoester" of "... via ASN Bank Betaalverzoek"). Hieruit pellen we
+// een bruikbare naam: eerste persoon, zonder aanhef en zonder "via <bank>"-staart.
+function cleanPayerName(raw) {
+  let s = String(raw || "").trim();
+  s = s.replace(/\s+via\s+.*$/i, "");                       // "via ASN Bank ... Betaalverzoek"
+  s = s.split(/\s*,\s*|\s+e\/o\s+/i)[0];                    // eerste persoon bij meerdere
+  s = s.replace(/^(de\s+heer|mevrouw|mevr\.?|dhr\.?|hr\.?|mw\.?|fam\.?)\s+/i, "");
+  return s.trim();
+}
+// Woorden waarop we namen vergelijken: minstens 3 letters, dus initialen en aanhef vallen af.
+function nameTokens(raw) {
+  return String(raw || "").toLowerCase()
+    .replace(/[^a-zà-ÿ\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !["hr", "mw", "mevr", "dhr", "heer", "fam", "via", "bank"].includes(w));
+}
+function namesLikelyMatch(a, b) {
+  const ta = nameTokens(a), tb = nameTokens(b);
+  if (!ta.length || !tb.length) return false;
+  return ta.some((x) => tb.some((y) => x === y || (x.length >= 4 && y.length >= 4 && (x.startsWith(y) || y.startsWith(x)))));
+}
+// Namen die de app zelf verzon; die mag hij overschrijven met de naam uit de bank.
+const isDefaultPersonName = (n) => /^persoon\s*\d+$/i.test(String(n || "").trim());
+
+// Zoek per persoon de meest waarschijnlijke betaling. Greedy: één transactie wordt maar aan
+// één persoon voorgesteld. Score: bedrag exact = sterk, naam = sterk, paar cent verschil = zwak.
+// Dit stelt alleen voor (score >= 3); koppelen doet de gebruiker met één klik.
+// `gebruikt` mag van buiten komen (een Set van tx-id's) zodat meerdere bundels dezelfde
+// binnengekomen betaling niet allebei claimen.
+function bundleSuggestions(bundle, txns, jaar = null, gebruikt = null) {
+  const st = bundleStats(bundle, txns, jaar);
+  const eigen = bundleTxns(txns, st.key, jaar).map((t) => t.date).filter(Boolean).sort();
+  const vanaf = eigen[0] || "";   // een tikkie wordt pas betaald ná de eerste uitgave
+  const kandidaten = (txns || []).filter((t) => t.amountCents > 0 && unassignedOf(t) > 0 && (!vanaf || t.date >= vanaf));
+  const claim = gebruikt || new Set();
+  const out = {};
+  for (const p of st.people) {
+    if (p.open <= 0) continue;
+    let beste = null, besteScore = 0;
+    for (const t of kandidaten) {
+      if (claim.has(t.id)) continue;
+      const vrij = unassignedOf(t);
+      let score = 0;
+      if (vrij === p.open) score += 3;
+      else if (Math.abs(vrij - p.open) <= 5) score += 1;
+      if (!isDefaultPersonName(p.naam) && namesLikelyMatch(t.name, p.naam)) score += 3;
+      if (score > besteScore) { besteScore = score; beste = t; }
+    }
+    if (beste && besteScore >= 3) {
+      claim.add(beste.id);
+      // Koppel de héle vrije betaling als die niet groter is dan wat open staat; bij overbetaling
+      // koppelen we exact het openstaande deel (de rest blijft zichtbaar vrij op de transactie).
+      const vrij = unassignedOf(beste);
+      out[p.id] = { tx: beste, bedrag: Math.min(p.open, vrij), over: Math.max(0, vrij - p.open), zeker: besteScore >= 6, naam: cleanPayerName(beste.name) };
+    }
+  }
+  return out;
+}
+
+// Voorstellen voor álle gedeelde bundels tegelijk, met één gedeelde claim-set zodat geen enkele
+// binnengekomen betaling bij twee bundels tegelijk wordt voorgesteld.
+function allBundleSuggestions(bundles, txns, jaar = null) {
+  const gebruikt = new Set();
+  const out = {};
+  // eerst de bundels met de meeste openstaande personen: die hebben de sterkste claim op geld
+  const geordend = [...(bundles || [])].filter((b) => (b.people || []).length > 0);
+  for (const b of geordend) out[b.key] = bundleSuggestions(b, txns, jaar, gebruikt);
+  return out;
+}
+
 
 function bundleLabels(txns) {
   const seen = new Map();
@@ -457,32 +529,6 @@ function parseINGCsv(text) {
 }
 
 /* ------------------------------------------------------------ Voorbeeld-CSV */
-const SAMPLE_CSV = `Datum;Naam / Omschrijving;Rekening;Tegenrekening;Code;Af Bij;Bedrag (EUR);Mutatiesoort;Mededelingen;Saldo na mutatie;Tag
-20260511;I. Volwater e/o T.L. Zuijderduin via ASN Bank voorheen SNS Betaalverzo;NL30INGB0700166238;NL19SNSB0705717593;IW;Af;15;iDEAL | Wero;Naam: I. Volwater Omschrijving: Pizza IBAN: NL19SNSB0705717593 Kenmerk: 11-05-2026 11:39 Valutadatum: 11-05-2026;451,56;
-20260511;La Place Duinrell WASSENAAR NLD;NL30INGB0700166238;;BA;Af;14,45;Betaalautomaat;Pasvolgnr: 901 10-05-2026 10:56 Apple Pay Valutadatum: 11-05-2026;466,56;
-20260510;Hr RW Boekestijn,Mw E Knoester;NL30INGB0700166238;NL79INGB0700147896;GT;Bij;21,8;Online bankieren;Naam: Hr RW Boekestijn Omschrijving: Bakker van Maanen IBAN: NL79INGB0700147896 Valutadatum: 10-05-2026;481,01;
-20260510;Hr F van Alphen;NL30INGB0700166238;NL79INGB0004934152;GT;Bij;2,95;Online bankieren;Naam: Hr F van Alphen Omschrijving: Retourkosten zara IBAN: NL79INGB0004934152 Valutadatum: 10-05-2026;459,21;
-20260510;K. Lagendijk;NL30INGB0700166238;NL58INGB0008475903;GT;Af;48,73;Online bankieren;Naam: K. Lagendijk Omschrijving: Cadeau Pernille IBAN: NL58INGB0008475903 Valutadatum: 10-05-2026;358,8;
-20260510;MW K Lagendijk;NL30INGB0700166238;NL58INGB0008475903;GT;Af;250;Online bankieren;Naam: MW K Lagendijk Omschrijving: Cash IBAN: NL58INGB0008475903 Valutadatum: 10-05-2026;407,53;
-20260510;Hr F van Alphen;NL30INGB0700166238;NL79INGB0004934152;GT;Af;8,49;Online bankieren;Naam: Hr F van Alphen Omschrijving: Parkeerkosten IBAN: NL79INGB0004934152 Valutadatum: 10-05-2026;657,53;
-20260510;Hr F van Alphen;NL30INGB0700166238;NL79INGB0004934152;GT;Af;25,11;Online bankieren;Naam: Hr F van Alphen Omschrijving: Victorinox messen IBAN: NL79INGB0004934152 Valutadatum: 10-05-2026;666,02;
-20260510;Plus Moerkapelle MOERKAPELLE NLD;NL30INGB0700166238;;BA;Af;9,98;Betaalautomaat;Pasvolgnr: 901 09-05-2026 17:07 Apple Pay Valutadatum: 10-05-2026;691,13;
-20260510;PLUS Moerkapelle MOERKAPELLE NLD;NL30INGB0700166238;;BA;Af;18,16;Betaalautomaat;Pasvolgnr: 900 09-05-2026 16:18 Apple Pay Valutadatum: 10-05-2026;701,11;
-20260510;Kosten OranjePakket;NL30INGB0700166238;;DV;Af;4;Diversen;1 apr t/m 30 apr 2026 ING BANK N.V. Valutadatum: 10-05-2026;719,27;
-20260510;Kosten tweede rekeninghouder;NL30INGB0700166238;;DV;Af;1,2;Diversen;1 apr t/m 30 apr 2026 ING BANK N.V. Valutadatum: 10-05-2026;723,27;
-20260509;BCK*Etos Gouda Bloemen GOUDA NLD;NL30INGB0700166238;;BA;Af;47,97;Betaalautomaat;Pasvolgnr: 901 08-05-2026 12:34 Apple Pay Valutadatum: 09-05-2026;724,47;
-20260509;CCV*J P VAN EESTEREN B GOUDA NLD;NL30INGB0700166238;;BA;Af;2,5;Betaalautomaat;Pasvolgnr: 901 08-05-2026 12:08 Apple Pay Valutadatum: 09-05-2026;772,44;
-20260508;Hr M Lagendijk;NL30INGB0700166238;NL03INGB0669758485;GT;Bij;15,8;Online bankieren;Naam: Hr M Lagendijk Omschrijving: bol.com IBAN: NL03INGB0669758485 Valutadatum: 08-05-2026;774,94;
-20260508;CCV*J P VAN EESTEREN B GOUDA NLD;NL30INGB0700166238;;BA;Af;2,5;Betaalautomaat;Pasvolgnr: 901 07-05-2026 12:17 Apple Pay Valutadatum: 08-05-2026;759,14;
-20260508;Albert Heijn 1629 ZOETERMEER NLD;NL30INGB0700166238;;BA;Af;9,37;Betaalautomaat;Pasvolgnr: 900 07-05-2026 12:50 Apple Pay Valutadatum: 08-05-2026;736,65;
-20260508;ZEEMAN ZOETERMEER PROM NLD;NL30INGB0700166238;;BA;Af;3,18;Betaalautomaat;Pasvolgnr: 900 07-05-2026 13:01 Apple Pay Valutadatum: 08-05-2026;746,02;
-20260508;CCV*Bagels & Beans Zoe NLD;NL30INGB0700166238;;BA;Af;21,3;Betaalautomaat;Pasvolgnr: 900 07-05-2026 12:40 Apple Pay Valutadatum: 08-05-2026;749,2;
-20260508;Albert Heijn Online ZAANDAM NLD;NL30INGB0700166238;;BA;Af;68,07;Betaalautomaat;Pasvolgnr: 900 07-05-2026 19:32 Apple Pay Valutadatum: 08-05-2026;770,5;
-20260508;HEMA EV0068 Zoetermeer NLD;NL30INGB0700166238;;BA;Af;19,99;Betaalautomaat;Pasvolgnr: 900 07-05-2026 11:49 Apple Pay Valutadatum: 08-05-2026;838,57;
-20260508;TMC*StadshartZoetP5Ui1 NLD;NL30INGB0700166238;;BA;Af;3;Betaalautomaat;Pasvolgnr: 900 07-05-2026 13:10 Apple Pay Valutadatum: 08-05-2026;858,56;
-20260508;Hr F van Alphen;NL30INGB0700166238;NL79INGB0004934152;GT;Bij;652,05;Online bankieren;Naam: Hr F van Alphen Omschrijving: declaratie jpe IBAN: NL79INGB0004934152 Valutadatum: 08-05-2026;861,56;
-20260506;Klarna Bank AB (publ);NL30INGB0700166238;NL73DEUT0265001135;OV;Af;56;Overschrijving;Naam: Klarna Bank Omschrijving: aankoop IBAN: NL73DEUT0265001135 Valutadatum: 06-05-2026;115,51;
-20260506;K. Lagendijk;NL30INGB0700166238;NL58INGB0008475903;GT;Af;7,26;Online bankieren;Naam: K. Lagendijk Omschrijving: Begrafenisverzekering IBAN: NL58INGB0008475903 Valutadatum: 06-05-2026;171,51;`;
 
 /* ---------------------------------------------------------------- Seed */
 const SLUITPOST_ID = slug("Gezamenlijke spaarrekening / ING");
@@ -612,4 +658,4 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 /* PAGINA'S                                                              */
 /* ===================================================================== */
 
-export { bundleKeyOf, bundleTxns, bundleTotalCents, bundleShareCents, bundlePaidBy, bundleStats, computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, reconcileImport, matchCondition, ruleMatches, matchSpaarcode, extractOranjeCode, savingsKeyword, extractSavingsAccount, savingsHint, unknownSavingsCodes, savingsCatForTx, derivedPotMutation, potFlows, potMutations, potHistory, debugLogImport, categorize, catAllowed, SUPERMARKETS, detectChain, distributeProportional, settlementsOf, assignedOf, unassignedOf, recoveredFor, allocsFromSettlements, expectedBackOf, remainingOf, bundleLabels, splitCsvLine, extractOmschrijving, parseINGRows, parseINGCsv, SAMPLE_CSV, SLUITPOST_ID, computeSluitpostMonths, applySluitpost, budgetTotals, normName, matchCategoryByName, cellToCents, parseBudgetRows, txYearActuals, KW_STOP, tokenize, guessKeyword, rankSuggestions };
+export { bundleKeyOf, bundleTxns, bundleTotalCents, bundleShareCents, bundlePaidBy, bundleStats, bundleSuggestions, allBundleSuggestions, cleanPayerName, isDefaultPersonName, computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, reconcileImport, matchCondition, ruleMatches, matchSpaarcode, extractOranjeCode, savingsKeyword, extractSavingsAccount, savingsHint, unknownSavingsCodes, savingsCatForTx, derivedPotMutation, potFlows, potMutations, potHistory, debugLogImport, categorize, catAllowed, SUPERMARKETS, detectChain, distributeProportional, settlementsOf, assignedOf, unassignedOf, recoveredFor, allocsFromSettlements, expectedBackOf, remainingOf, bundleLabels, splitCsvLine, extractOmschrijving, parseINGRows, parseINGCsv, SLUITPOST_ID, computeSluitpostMonths, applySluitpost, budgetTotals, normName, matchCategoryByName, cellToCents, parseBudgetRows, txYearActuals, KW_STOP, tokenize, guessKeyword, rankSuggestions };
