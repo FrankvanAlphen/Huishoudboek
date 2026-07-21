@@ -66,6 +66,9 @@ const MND_LANG = ["januari", "februari", "maart", "april", "mei", "juni", "juli"
 const BATCH_COLORS = ["#7c3aed", "#0891b2", "#d97706", "#2563eb", "#db2777", "#16a34a", "#9333ea", "#0d9488"];
 function batchColor(id) { return id ? BATCH_COLORS[parseInt(fnv1a(String(id)), 16) % BATCH_COLORS.length] : "transparent"; }
 // Groepeer transacties per importbatch (nieuwste eerst).
+// Korte unieke id voor bundels/personen; botst in de praktijk niet binnen één huishouden.
+function uid() { return "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
 function batchesOf(txns) {
   const m = new Map();
   for (const t of txns || []) {
@@ -94,4 +97,4 @@ function fmtWhen(at) {
   catch { return ""; }
 }
 
-export { _xlsxPromise, loadXLSX, parseDecimalToCents, eur, formatEUR, editEUR, parseINGDate, effDate, effYear, effMonth, distributeEven, sumMonths, checkDistribution, MND_KORT, MND_LANG, BATCH_COLORS, batchColor, batchesOf, fmtDateTime, fnv1a, norm, contentKey, dedupHash, slug, fmtWhen };
+export { uid, _xlsxPromise, loadXLSX, parseDecimalToCents, eur, formatEUR, editEUR, parseINGDate, effDate, effYear, effMonth, distributeEven, sumMonths, checkDistribution, MND_KORT, MND_LANG, BATCH_COLORS, batchColor, batchesOf, fmtDateTime, fnv1a, norm, contentKey, dedupHash, slug, fmtWhen };

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { me } from "./api.js";
 import { formatEUR, effYear, effMonth, distributeEven, sumMonths, MND_KORT } from "./lib.js";
-import { detectChain, applySluitpost, bundleStats, unassignedOf, bundleShareCents, settlementsOf, isDefaultPersonName, bundleSuggestions, cleanPayerName } from "./financieel.js";
+import { detectChain, applySluitpost } from "./financieel.js";
 import { T, Btn, Card, Money, MoneyInput, Banner, SectionTitle, MaandKiezer, MaandTabel, ScrollTabel, Chip, Keuze, inputStyle } from "./ui.jsx";
 
 // ---- Uitgaven-tabblad ----

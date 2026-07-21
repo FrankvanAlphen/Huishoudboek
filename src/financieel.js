@@ -284,189 +284,67 @@ function detectChain(name) {
   const first = String(name || "").trim().split(/\s+/)[0] || "Overig";
   return first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : "Overig";
 }
-// Verdeel een (deel)terugbetaling evenredig over de posten van een voorschot.
-// allocations = de (negatieve) allocaties van het voorschot; resultaat = positieve allocaties die optellen tot magnitude.
-function distributeProportional(magnitude, allocations) {
-  const list = (allocations || []).filter((a) => a && a.categoryId);
-  if (!list.length) return [];
-  const mags = list.map((a) => Math.abs(a.amountCents));
-  const sum = mags.reduce((x, y) => x + y, 0) || 1;
-  let assigned = 0;
-  return list.map((a, i) => {
-    const v = i === list.length - 1 ? magnitude - assigned : Math.round((magnitude * mags[i]) / sum);
-    assigned += v;
-    return { categoryId: a.categoryId, amountCents: v };
-  });
-}
-// Koppelingen van een binnenkomend bedrag aan voorschotten. Eén bedrag mag over meerdere tikkies verdeeld worden.
-function settlementsOf(tx) {
-  if (tx && Array.isArray(tx.settlements)) return tx.settlements;
-  if (tx && tx.settledWith) return [{ advanceId: tx.settledWith, amountCents: Math.abs(tx.amountCents) }]; // oude enkele koppeling
-  return [];
-}
-function assignedOf(tx) { return settlementsOf(tx).reduce((s, x) => s + (x.amountCents || 0), 0); }
-function unassignedOf(tx) { return Math.max(0, Math.abs((tx && tx.amountCents) || 0) - assignedOf(tx)); }
-// Hoeveel van een voorschot is al terugbetaald (som van de gekoppelde delen van binnenkomende bedragen).
-function recoveredFor(advanceId, txns) {
-  let r = 0;
-  for (const t of txns || []) for (const s of settlementsOf(t)) if (s.advanceId === advanceId) r += s.amountCents || 0;
-  return r;
-}
-// Verdeel de allocaties van een binnenkomend bedrag over de gekoppelde voorschotten (netteert per post).
-function allocsFromSettlements(settlements, txns) {
-  const out = [];
-  for (const s of settlements || []) {
-    // Bundelbetaling: reken het bedrag proportioneel toe aan de posten van de héle bundel,
-    // zodat teruggekregen geld op dezelfde posten landt als de uitgaven van die bundel.
-    if (s.bundleKey) {
-      const alle = [];
-      for (const t of bundleTxns(txns, s.bundleKey)) for (const a of t.allocations || []) alle.push(a);
-      for (const a of distributeProportional(s.amountCents, alle)) out.push(a);
-      continue;
-    }
-    const adv = (txns || []).find((t) => t.id === s.advanceId); if (adv && (adv.allocations || []).length) for (const a of distributeProportional(s.amountCents, adv.allocations)) out.push(a);
-  }
-  return out;
-}
-// Verwacht terug te ontvangen bedrag van een voorschot (deel mag); standaard het hele bedrag.
-function expectedBackOf(adv) { return adv && adv.expectedBackCents != null ? adv.expectedBackCents : Math.abs((adv && adv.amountCents) || 0); }
-// Resterend openstaand bedrag van een voorschot.
-function remainingOf(adv, txns) { return expectedBackOf(adv) - recoveredFor(adv.id, txns); }
-// ---- Bundels delen (tikkie) ----
-// Een bundel is een groep transacties met hetzelfde label. Deel je hem, dan wordt het
-// totaal gedeeld door (jij + de anderen); ieders deel is gelijk. Wat de anderen samen
-// verschuldigd zijn, is wat je terugverwacht. Inkomende betalingen koppel je per persoon.
-const bundleKeyOf = (t) => ((t && t.bundle) || "").trim().toLowerCase();
+// ============================================================================
+// BUNDELS (nieuw model) — zelfstandige objecten die naar transacties verwijzen.
+// Een bundel: { id, naam, txIds:[], verdeelModus:"personen"|"bedrag", ikDoeMee:bool,
+//               personen:[{id,naam,bedragCents|null,betaald:bool}], afgehandeld:bool }
+// Geen settlements, geen herkenning meer: je vinkt handmatig per persoon 'betaald' aan.
+// ============================================================================
 
-// Alle transacties van één bundel binnen een jaar (jaar = null: alle jaren).
-function bundleTxns(txns, key, jaar = null) {
-  const k = String(key || "").toLowerCase();
-  return (txns || []).filter((t) => bundleKeyOf(t) === k && (jaar == null || effYear(t) === jaar));
+// De transacties die bij een bundel horen, in de volgorde van het afschrift.
+function bundleTxnsById(txns, bundle) {
+  const ids = new Set((bundle && bundle.txIds) || []);
+  return (txns || []).filter((t) => ids.has(t.id));
 }
 
 // Totaal van de bundel in centen, altijd positief (het is een uitgave die je deelt).
-function bundleTotalCents(txns, key, jaar = null) {
-  return Math.abs(bundleTxns(txns, key, jaar).reduce((s, t) => s + (t.amountCents || 0), 0));
+function bundleTotalById(txns, bundle) {
+  return Math.abs(bundleTxnsById(txns, bundle).reduce((s, t) => s + (t.amountCents || 0), 0));
 }
 
-// Wat één ander persoon moet betalen. Tikkie kan geen halve centen, dus rond je het deel
-// naar BOVEN af — precies zoals je het tikkie verstuurt. Jouw eigen deel is wat er overblijft
-// (total - anderen), en is daardoor hooguit een paar cent kleiner dan dat van de rest.
-// Voorbeeld: 500,03 met z'n vijven -> anderen 100,01 elk (= 400,04), jij 99,99.
-function bundleShareCents(totalCents, aantalAnderen) {
-  const n = Math.max(1, (aantalAnderen || 0) + 1); // jij telt altijd mee
-  return Math.ceil(totalCents / n);
+// Gelijk verdelen: totaal / aantal deelnemers, naar boven afgerond (een tikkie kent geen halve
+// centen). Deelnemers = de personen + jij, als je meedoet. Geeft het bedrag dat één ander betaalt.
+function gelijkDeelCents(totalCents, aantalPersonen, ikDoeMee) {
+  const deelnemers = Math.max(1, (aantalPersonen || 0) + (ikDoeMee ? 1 : 0));
+  return Math.ceil(totalCents / deelnemers);
 }
 
-// Wat er al binnen is van één persoon in deze bundel.
-function bundlePaidBy(txns, key, personId) {
-  const k = String(key || "").toLowerCase();
-  let sum = 0;
-  for (const t of txns || []) {
-    if (!(t.amountCents > 0)) continue;
-    for (const s of settlementsOf(t)) {
-      if (String(s.bundleKey || "").toLowerCase() === k && s.personId === personId) sum += s.amountCents || 0;
-    }
+// Volledige stand van een bundel: totaal, per persoon het bedrag + betaald-status, en het verschil
+// tussen de som van de persoonsbedragen en het werkelijke totaal (bij 'bedrag per persoon' kan de
+// gebruiker enkelingen aanpassen, dan hoeft het niet exact te kloppen — we tónen het verschil).
+function bundleStand(bundle, txns) {
+  const b = bundle || {};
+  const total = bundleTotalById(txns, b);
+  const personen = (b.personen || []);
+  const ikDoeMee = !!b.ikDoeMee;
+  let perPersoon;
+  if (b.verdeelModus === "bedrag") {
+    // ieder z'n eigen bedrag; waar niet ingevuld, val terug op een gelijk deel als hint
+    const gelijk = gelijkDeelCents(total, personen.length, ikDoeMee);
+    perPersoon = personen.map((p) => ({ ...p, bedrag: (p.bedragCents == null ? gelijk : p.bedragCents) }));
+  } else {
+    const deel = gelijkDeelCents(total, personen.length, ikDoeMee);
+    perPersoon = personen.map((p) => ({ ...p, bedrag: deel }));
   }
-  return sum;
-}
-
-// Volledige stand van een gedeelde bundel: totaal, ieders deel, per persoon betaald/open.
-function bundleStats(bundle, txns, jaar = null) {
-  const key = String((bundle && bundle.key) || "").toLowerCase();
-  const anderen = (bundle && bundle.people) || [];
-  const total = bundleTotalCents(txns, key, jaar);
-  const share = bundleShareCents(total, anderen.length);
-  const people = anderen.map((p) => {
-    const paid = bundlePaidBy(txns, key, p.id);
-    return { ...p, share, paid, open: Math.max(0, share - paid), klaar: paid >= share };
-  });
-  const expectedBack = share * anderen.length;   // jouw eigen deel verwacht je niet terug
-  const received = people.reduce((s, p) => s + p.paid, 0);
+  const somAnderen = perPersoon.reduce((s, p) => s + (p.bedrag || 0), 0);
+  const mijnDeel = ikDoeMee ? Math.max(0, total - somAnderen) : (total - somAnderen); // kan negatief bij oververdeling
+  const verschil = total - somAnderen - (ikDoeMee ? mijnDeel : 0); // 0 als het netjes opgaat
+  const betaaldAantal = perPersoon.filter((p) => p.betaald).length;
+  const ontvangen = perPersoon.filter((p) => p.betaald).reduce((s, p) => s + (p.bedrag || 0), 0);
+  const openBedrag = perPersoon.filter((p) => !p.betaald).reduce((s, p) => s + (p.bedrag || 0), 0);
+  const iedereenBetaald = personen.length > 0 && perPersoon.every((p) => p.betaald);
   return {
-    key, naam: (bundle && bundle.naam) || key, total, share, mijnDeel: total - expectedBack,
-    expectedBack, received, open: Math.max(0, expectedBack - received), people,
-    klaar: anderen.length > 0 && received >= expectedBack,
+    total, ikDoeMee, mijnDeel, verschil,
+    personen: perPersoon,
+    somAnderen, ontvangen, openBedrag,
+    betaaldAantal, aantalPersonen: personen.length,
+    iedereenBetaald,
   };
 }
 
-// ---- Betaalde tikkies herkennen ----
-// Bij ING staat de naam van de betaler in het naamveld ("Hr M Lagendijk", soms
-// "Hr RW Boekestijn,Mw E Knoester" of "... via ASN Bank Betaalverzoek"). Hieruit pellen we
-// een bruikbare naam: eerste persoon, zonder aanhef en zonder "via <bank>"-staart.
-function cleanPayerName(raw) {
-  let s = String(raw || "").trim();
-  s = s.replace(/\s+via\s+.*$/i, "");                       // "via ASN Bank ... Betaalverzoek"
-  s = s.split(/\s*,\s*|\s+e\/o\s+/i)[0];                    // eerste persoon bij meerdere
-  s = s.replace(/^(de\s+heer|mevrouw|mevr\.?|dhr\.?|hr\.?|mw\.?|fam\.?)\s+/i, "");
-  return s.trim();
-}
-// Woorden waarop we namen vergelijken: minstens 3 letters, dus initialen en aanhef vallen af.
-function nameTokens(raw) {
-  return String(raw || "").toLowerCase()
-    .replace(/[^a-zà-ÿ\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length >= 3 && !["hr", "mw", "mevr", "dhr", "heer", "fam", "via", "bank"].includes(w));
-}
-function namesLikelyMatch(a, b) {
-  const ta = nameTokens(a), tb = nameTokens(b);
-  if (!ta.length || !tb.length) return false;
-  return ta.some((x) => tb.some((y) => x === y || (x.length >= 4 && y.length >= 4 && (x.startsWith(y) || y.startsWith(x)))));
-}
-// Namen die de app zelf verzon; die mag hij overschrijven met de naam uit de bank.
-const isDefaultPersonName = (n) => /^persoon\s*\d+$/i.test(String(n || "").trim());
-
-// Zoek per persoon de meest waarschijnlijke betaling. Greedy: één transactie wordt maar aan
-// één persoon voorgesteld. Score: bedrag exact = sterk, naam = sterk, paar cent verschil = zwak.
-// Dit stelt alleen voor (score >= 3); koppelen doet de gebruiker met één klik.
-// `gebruikt` mag van buiten komen (een Set van tx-id's) zodat meerdere bundels dezelfde
-// binnengekomen betaling niet allebei claimen.
-function bundleSuggestions(bundle, txns, jaar = null, gebruikt = null) {
-  const st = bundleStats(bundle, txns, jaar);
-  const eigen = bundleTxns(txns, st.key, jaar).map((t) => t.date).filter(Boolean).sort();
-  const vanaf = eigen[0] || "";   // een tikkie wordt pas betaald ná de eerste uitgave
-  const kandidaten = (txns || []).filter((t) => t.amountCents > 0 && unassignedOf(t) > 0 && (!vanaf || t.date >= vanaf));
-  const claim = gebruikt || new Set();
-  const out = {};
-  for (const p of st.people) {
-    if (p.open <= 0) continue;
-    let beste = null, besteScore = 0;
-    for (const t of kandidaten) {
-      if (claim.has(t.id)) continue;
-      const vrij = unassignedOf(t);
-      let score = 0;
-      if (vrij === p.open) score += 3;
-      else if (Math.abs(vrij - p.open) <= 5) score += 1;
-      if (!isDefaultPersonName(p.naam) && namesLikelyMatch(t.name, p.naam)) score += 3;
-      if (score > besteScore) { besteScore = score; beste = t; }
-    }
-    if (beste && besteScore >= 3) {
-      claim.add(beste.id);
-      // Koppel de héle vrije betaling als die niet groter is dan wat open staat; bij overbetaling
-      // koppelen we exact het openstaande deel (de rest blijft zichtbaar vrij op de transactie).
-      const vrij = unassignedOf(beste);
-      out[p.id] = { tx: beste, bedrag: Math.min(p.open, vrij), over: Math.max(0, vrij - p.open), zeker: besteScore >= 6, naam: cleanPayerName(beste.name) };
-    }
-  }
-  return out;
-}
-
-// Voorstellen voor álle gedeelde bundels tegelijk, met één gedeelde claim-set zodat geen enkele
-// binnengekomen betaling bij twee bundels tegelijk wordt voorgesteld.
-function allBundleSuggestions(bundles, txns, jaar = null) {
-  const gebruikt = new Set();
-  const out = {};
-  // eerst de bundels met de meeste openstaande personen: die hebben de sterkste claim op geld
-  const geordend = [...(bundles || [])].filter((b) => (b.people || []).length > 0);
-  for (const b of geordend) out[b.key] = bundleSuggestions(b, txns, jaar, gebruikt);
-  return out;
-}
-
-
-function bundleLabels(txns) {
-  const seen = new Map();
-  for (const t of txns || []) { const raw = (t.bundle || "").trim(); if (!raw) continue; const k = raw.toLowerCase(); if (!seen.has(k)) seen.set(k, raw); }
-  return [...seen.values()].sort((a, b) => a.localeCompare(b, "nl"));
+// Labels van bundels (voor filters e.d.), op naam gesorteerd.
+function bundleNamen(bundles) {
+  return [...(bundles || [])].map((b) => b.naam).filter(Boolean).sort((a, b) => a.localeCompare(b, "nl"));
 }
 
 /* --------------------------------------------------- Begrotingsmatrix-parser */
@@ -658,4 +536,4 @@ function rankSuggestions(tx, rules, categories, history, max = 4) {
 /* PAGINA'S                                                              */
 /* ===================================================================== */
 
-export { bundleKeyOf, bundleTxns, bundleTotalCents, bundleShareCents, bundlePaidBy, bundleStats, bundleSuggestions, allBundleSuggestions, cleanPayerName, isDefaultPersonName, computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, reconcileImport, matchCondition, ruleMatches, matchSpaarcode, extractOranjeCode, savingsKeyword, extractSavingsAccount, savingsHint, unknownSavingsCodes, savingsCatForTx, derivedPotMutation, potFlows, potMutations, potHistory, debugLogImport, categorize, catAllowed, SUPERMARKETS, detectChain, distributeProportional, settlementsOf, assignedOf, unassignedOf, recoveredFor, allocsFromSettlements, expectedBackOf, remainingOf, bundleLabels, splitCsvLine, extractOmschrijving, parseINGRows, parseINGCsv, SLUITPOST_ID, computeSluitpostMonths, applySluitpost, budgetTotals, normName, matchCategoryByName, cellToCents, parseBudgetRows, txYearActuals, KW_STOP, tokenize, guessKeyword, rankSuggestions };
+export { bundleTxnsById, bundleTotalById, gelijkDeelCents, bundleStand, bundleNamen, computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, reconcileImport, matchCondition, ruleMatches, matchSpaarcode, extractOranjeCode, savingsKeyword, extractSavingsAccount, savingsHint, unknownSavingsCodes, savingsCatForTx, derivedPotMutation, potFlows, potMutations, potHistory, debugLogImport, categorize, catAllowed, SUPERMARKETS, detectChain, splitCsvLine, extractOmschrijving, parseINGRows, parseINGCsv, SLUITPOST_ID, computeSluitpostMonths, applySluitpost, budgetTotals, normName, matchCategoryByName, cellToCents, parseBudgetRows, txYearActuals, KW_STOP, tokenize, guessKeyword, rankSuggestions };

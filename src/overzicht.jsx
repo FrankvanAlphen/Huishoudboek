@@ -8,7 +8,7 @@ import { Transacties } from "./transacties.jsx";
 // Drie kernblokken: nalopen, maand-resultaat en uitgaven per maand. De rest zit achter
 // "Meer inzicht". Rekent zelf niets uit: alle cijfers komen als props uit App.jsx.
 
-function Overzicht({ vitals, monthly = [], topPostsByMonth = [], teSorteren = 0, onDrill, currentMonth, jaar, openActions, forecast, forecastYear = null, reconciliation = null, agingAdvances = [], openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
+function Overzicht({ vitals, monthly = [], topPostsByMonth = [], teSorteren = 0, onDrill, currentMonth, jaar, openActions, forecast, forecastYear = null, reconciliation = null, openingBalanceCents, bankBalanceCents, saldoGaps = 0, chainOpening = null, freqAlerts = [], topDeviations = [], missingRecurring = [], recurringTotal = 0, recurringPaid = 0, savingsRate = null, vastMonthly = 0, varMonthly = 0, onSetOpeningBalance, onGoto, onReview }) {
   const [reopen, setReopen] = useState(false);
   const [more, setMore] = useState(false); // extra dashboard-kaarten inklapbaar
   const [selMonth, setSelMonth] = useState(currentMonth); // gekozen maand voor het maand-resultaatblok
@@ -259,23 +259,6 @@ function Overzicht({ vitals, monthly = [], topPostsByMonth = [], teSorteren = 0,
                 : <>Nog geen sluitende maand om af te letteren.</>}
           </div>
           <Btn size="sm" variant="secondary" onClick={() => onGoto && onGoto("transacties")}>Transacties</Btn>
-        </Card>
-      )}
-
-      {agingAdvances.length > 0 && (
-        <Card style={{ padding: 16, marginBottom: 16, border: `1px solid ${agingAdvances.some((a) => a.days >= 30) ? "#f0dcb8" : T.line}`, background: agingAdvances.some((a) => a.days >= 30) ? T.warnSoft : T.panel }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
-            <div style={{ fontWeight: 700, fontSize: 14, color: agingAdvances.some((a) => a.days >= 30) ? "#9a6a14" : T.ink }}>Openstaande voorschotten · {agingAdvances.length}</div>
-            <Btn size="sm" variant="secondary" onClick={() => onGoto && onGoto("transacties")}>Afhandelen</Btn>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-            {agingAdvances.slice(0, 6).map((a) => (
-              <div key={a.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
-                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
-                <span style={{ flexShrink: 0 }}><b>{formatEUR(a.remaining)}</b> open · <span style={{ color: a.days >= 30 ? T.neg : T.sub }}>{a.days} dag{a.days === 1 ? "" : "en"}</span></span>
-              </div>
-            ))}
-          </div>
         </Card>
       )}
 

@@ -1,8 +1,8 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { formatEUR, MND_KORT, batchesOf, effYear, effMonth, batchColor, fmtDateTime } from "./lib.js";
-import { settlementsOf, unassignedOf, guessKeyword, unknownSavingsCodes, remainingOf, bundleLabels, ruleMatches, rankSuggestions, bundleStats } from "./financieel.js";
+import { guessKeyword, unknownSavingsCodes, ruleMatches, rankSuggestions } from "./financieel.js";
 import { T, Btn, Card, inputStyle, MaandKiezer, Chip, MoneyInput, SectionTitle, Badge, PeriodControl} from "./ui.jsx";
-import { ExpectedBackEditor, TX_COLS, TxRow, PostPicker, VermogenHint, SplitEditor, RuleLearn } from "./txrow.jsx";
+import { TX_COLS, TxRow, PostPicker, VermogenHint, SplitEditor, RuleLearn } from "./txrow.jsx";
 import { useHuishoudboekje } from "./store.jsx";
 
 // ---- Transacties-tabblad ----
@@ -159,7 +159,6 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
   const batches = useMemo(() => batchesOf(transactions), [transactions]);
   const newestBatch = batches[0] || null;
   const newestUnreviewed = newestBatch && !reviewedBatches.includes(newestBatch.id) ? newestBatch : null;
-  const openAdvances = transactions.filter((t) => t.advance && remainingOf(t, transactions) > 0).length;
   const [maand, setMaand] = useState(0);
   const [status, setStatus] = useState("alle");
   const [q, setQ] = useState("");
@@ -201,9 +200,9 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
         <SectionTitle>Transacties {year.jaartal}</SectionTitle>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {teSorteren > 0 && !reviewing && <Btn size="sm" onClick={() => setReviewing(true)}>▶ Nalopen ({teSorteren})</Btn>}
-          {onAddManual && <Btn variant={showManual ? "secondary" : "ghost"} size="sm" onClick={() => { setShowManual((s) => !s); setShowCleanup(false); setShowVoorschot(false); }}>{showManual ? "Sluiten" : "+ Losse transactie"}</Btn>}
-          {onOpenTikkies && <Btn variant="ghost" size="sm" onClick={onOpenTikkies}>{`Tikkies & delen${openAdvances ? ` (${openAdvances})` : ""} →`}</Btn>}
-          {(onClearRange || onClearYear) && <Btn variant={showCleanup ? "secondary" : "ghost"} size="sm" onClick={() => { setShowCleanup((s) => !s); setShowManual(false); setShowVoorschot(false); }}>{showCleanup ? "Opschonen sluiten" : "Opschonen / wissen"}</Btn>}
+          {onAddManual && <Btn variant={showManual ? "secondary" : "ghost"} size="sm" onClick={() => { setShowManual((s) => !s); setShowCleanup(false); }}>{showManual ? "Sluiten" : "+ Losse transactie"}</Btn>}
+          {onOpenTikkies && <Btn variant="ghost" size="sm" onClick={onOpenTikkies}>{`Tikkies & delen →`}</Btn>}
+          {(onClearRange || onClearYear) && <Btn variant={showCleanup ? "secondary" : "ghost"} size="sm" onClick={() => { setShowCleanup((s) => !s); setShowManual(false); }}>{showCleanup ? "Opschonen sluiten" : "Opschonen / wissen"}</Btn>}
         </div>
       </div>
       {onCreateSavings && <OnbekendeSpaarrekeningen transactions={transactions} categories={categories} onCreateSavings={onCreateSavings} onLinkSavings={onLinkSavings} />}
@@ -261,7 +260,6 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
           <div style={{ display: isMobile ? "none" : "grid", gridTemplateColumns: TX_COLS, gap: 10, padding: "9px 14px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
             <span>Datum</span><span>Omschrijving</span><span style={{ textAlign: "right" }}>Bedrag</span><span>Post</span><span style={{ textAlign: "center" }}>Mark</span><span />
           </div>
-          <datalist id="bundel-labels">{bundleLabels(transactions).map((b) => <option key={b} value={b} />)}</datalist>
           {visible.map((t) => <TxRow key={t.id} tx={t} groups={groups} categories={categories} rules={rules} history={transactions} years={years} newBatchId={newestUnreviewed ? newestUnreviewed.id : null} onSetAllocations={onSetAllocations} onSetNote={onSetNote} onToggleFlag={onToggleFlag} onAddRule={onAddRule} onSaveOne={onSaveOne} />)}
           {shown.length === 0 && <div style={{ padding: 16, fontSize: 13, color: T.sub }}>Geen transacties met dit filter.</div>}
           {shown.length > visible.length && (
@@ -316,11 +314,6 @@ function ImportReview({ items, groups, categories, rules = [], history = [], tra
   const go = (d) => { setSplitting(false); setI((x) => Math.max(0, Math.min(total - 1, x + d))); };
   const ranked = !isSplit ? rankSuggestions(cur, rules, categories, history) : [];
   const dt = (iso) => `${iso.slice(8, 10)}-${iso.slice(5, 7)}-${iso.slice(2, 4)}`;
-  // Voor inkomende bedragen: openstaande voorschotten waar dit bedrag binnen past (deelaflossing mag).
-  const openAdvances = sign > 0 ? transactions.filter((t) => t.advance && t.id !== cur.id && (t.allocations || []).length > 0).map((adv) => ({ adv, remaining: remainingOf(adv, transactions) })).filter((a) => a.remaining > 0).sort((a, b) => Math.abs(a.remaining - Math.abs(cur.amountCents)) - Math.abs(b.remaining - Math.abs(cur.amountCents)) || (a.adv.date < b.adv.date ? -1 : 1)) : [];
-  const myLinks = settlementsOf(cur);
-  const linkedAdvs = myLinks.map((s) => transactions.find((t) => t.id === s.advanceId)).filter(Boolean);
-  const unsettleCur = () => update({ settledWith: undefined, settlements: [], allocations: [] });
   const sameCond = (r, kw) => r.conditions && r.conditions[0] && r.conditions[0].field === "both" && r.conditions[0].operator === "contains" && String(r.conditions[0].value).toLowerCase() === kw;
   const subsOfCat = (catId) => ((categories.find((c) => c.id === catId) || {}).subs) || [];
   const choosePost = (catId) => {
@@ -360,50 +353,17 @@ function ImportReview({ items, groups, categories, rules = [], history = [], tra
           <span style={{ fontSize: 12, color: T.sub, width: 64 }}>Notitie</span>
           <input value={cur.note || ""} onChange={(e) => update({ note: e.target.value })} placeholder="Eigen omschrijving — vervangt de bank-omschrijving in je overzichten" style={{ ...inputStyle, fontSize: 13, padding: "6px 10px" }} />
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-          <span style={{ fontSize: 12, color: T.sub, width: 64 }}>Bundel</span>
-          <input value={cur.bundle || ""} list="bundel-labels-wiz" onChange={(e) => update({ bundle: e.target.value })} placeholder="bijv. Verjaardag Maud — telt los op bij Uitgaven › Bundels" style={{ ...inputStyle, fontSize: 13, padding: "6px 10px" }} />
-          <datalist id="bundel-labels-wiz">{bundleLabels(transactions).map((b) => <option key={b} value={b} />)}</datalist>
-        </div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: sign < 0 ? 10 : 14, cursor: "pointer", fontSize: 13 }}>
           <input type="checkbox" checked={!!cur.flagged} onChange={(e) => update({ flagged: e.target.checked })} />
           Markeer als "nog uitzoeken"
         </label>
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13 }}>
-            <input type="checkbox" checked={!!cur.advance} onChange={(e) => update(e.target.checked ? { advance: true, expectedBackCents: cur.expectedBackCents != null ? cur.expectedBackCents : Math.abs(cur.amountCents) } : { advance: false })} />
-            Ik ga hier een tikkie voor sturen — verwacht (deels) terug
-          </label>
-          {cur.advance && <div style={{ marginTop: 8, marginLeft: 26 }}><ExpectedBackEditor amountCents={cur.amountCents} value={cur.expectedBackCents} onChange={(v) => update({ expectedBackCents: v })} /></div>}
-        </div>
         <div style={{ marginBottom: 14 }}><PeriodControl tx={cur} years={years} onChange={(pd) => update({ periodDate: pd })} /></div>
-
-        {sign > 0 && (linkedAdvs.length > 0 || openAdvances.length > 0) && (
-          <div style={{ background: "#f3f8f6", border: `1px solid ${T.accent}`, borderRadius: 9, padding: "10px 12px", marginBottom: 14 }}>
-            {linkedAdvs.length > 0 ? (
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ fontSize: 13, color: T.pos, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>✓ Gekoppeld aan {linkedAdvs.length === 1 ? `tikkie ${linkedAdvs[0].name}` : `${linkedAdvs.length} tikkies`}{unassignedOf(cur) > 0 ? ` · nog ${formatEUR(unassignedOf(cur))} vrij` : ""}</span>
-                <span style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-                  {unassignedOf(cur) > 0 && onOpenTikkies && <button onClick={onOpenTikkies} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>nog koppelen →</button>}
-                  <button onClick={unsettleCur} style={{ border: "none", background: "transparent", color: T.sub, cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>ontkoppel</button>
-                </span>
-              </div>
-            ) : (
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Hoort dit (deels) bij één of meer tikkies die je hebt gestuurd? Koppel het op het tikkiescherm met een vinkje.</div>
-                <div style={{ fontSize: 12, color: T.sub, marginBottom: 8 }}>Openstaand: {openAdvances.slice(0, 3).map(({ adv, remaining }) => `${adv.name} (${formatEUR(remaining)})`).join(" · ")}{openAdvances.length > 3 ? " · …" : ""}</div>
-                {onOpenTikkies && <button onClick={onOpenTikkies} style={{ border: `1px solid ${T.accent}`, background: T.accent, color: "#fff", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>→ Naar tikkiescherm</button>}
-                <div style={{ fontSize: 11.5, color: T.sub, marginTop: 8 }}>Hoort het ergens anders bij? Kies hieronder gewoon een post.</div>
-              </div>
-            )}
-          </div>
-        )}
 
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Waar hoort dit bij?</div>
         {isSplit
           ? <div style={{ fontSize: 13, marginBottom: 4 }}>Verdeeld over {allocs.length} posten. <button onClick={() => setSplitting(true)} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontWeight: 600 }}>wijzig</button> · <button onClick={() => setSingle("")} style={{ border: "none", background: "transparent", color: T.sub, cursor: "pointer" }}>maak leeg</button></div>
           : <PostPicker key={cur.id} categories={categories} groups={groups} sign={sign} value={singleCat} suggestions={ranked} onChange={choosePost} autoFocus />}
-        {sign > 0 && !isSplit && myLinks.length === 0 && openAdvances.length === 0 && <div style={{ fontSize: 12, color: T.sub, marginTop: 6 }}>Geld terug dat je had voorgeschoten? Kies de <b>uitgavepost</b> waarop je het had geboekt — die post wordt dan per saldo lager.</div>}
+        {sign > 0 && !isSplit && <div style={{ fontSize: 12, color: T.sub, marginTop: 6 }}>Geld terug dat je had voorgeschoten? Kies de <b>uitgavepost</b> waarop je het had geboekt — die post wordt dan per saldo lager.</div>}
         <div style={{ marginTop: 8 }}><VermogenHint tx={cur} categories={categories} /></div>
         {!isSplit && singleCat && subsOfCat(singleCat).length > 0 && (
           <div style={{ marginTop: 10, background: "#fff", border: `1px solid ${T.accent}`, borderRadius: 9, padding: "10px 12px" }}>

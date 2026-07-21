@@ -4,7 +4,7 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 
 ## Architectuur
 
-- `tikkies.jsx` — tabblad "Tikkies & delen": losse voorschotten (VoorschotPaneel) én gedeelde bundels (DelenPaneel: delen, herkennen, koppelen). Verhuisd uit uitgaven.jsx en transacties.jsx.
+- `tikkies.jsx` — tabblad "Tikkies & delen": één systeem voor delen. Je bundelt bestaande transacties, verdeelt het totaal (gelijk door personen óf een bedrag per persoon), vinkt handmatig af wie betaald heeft, en handelt de bundel af als iedereen rond is.
 
 
 | Bestand | Rol |
@@ -34,6 +34,38 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 | `DATABASE_SSL_STRICT`, `DATABASE_CA` | optioneel | Volledige certificaatcontrole op de databaseverbinding (nodig bij verbinden buiten Railway's interne netwerk). |
 | `PUBLIC_HOST` | aanbevolen | Je publieke hostnaam (bv. `huishoudboekje.up.railway.app`). Gezet? Dan accepteert de http→https-redirect alleen die host — dat sluit een open redirect via een vervalste Host-header volledig uit. |
 
+## Meerdere huishoudens (multi-tenant)
+
+De app kan meerdere gescheiden huishoudens bedienen op één server. Elk huishouden heeft een eigen,
+volledig afgeschermde boekhouding en kan één of meer gekoppelde accounts hebben (bijvoorbeeld beide
+partners), die allemaal dezelfde gegevens delen.
+
+**Datamodel.** Er is een `households`-tabel (sleutel + leesbare naam). Elke gebruiker in `users`
+heeft een `household`-kolom die naar die sleutel verwijst; de data-scheiding draait op die sleutel.
+De tabellen met data (`app_state`, `state_snapshots`, `users`, `audit_log`, `attachments`) hebben
+allemaal een `household`-kolom en élke query filtert erop. Het huishouden komt server-side uit de
+ingelogde gebruiker (`req.user.household`), nooit uit de cookie — een gebruiker kan het dus niet
+manipuleren. Gevoelige leesacties (bijlage per id, snapshot terugzetten) hebben `household` in de
+`WHERE`, zodat een geraden id nooit andermans data teruggeeft. `app_state.id` heeft een sequence
+gekregen zodat elk nieuw huishouden een eigen rij krijgt (vroeger was er één vaste rij, `id=1`).
+
+**Migratie.** Bestaande data (vóór multi-tenant) wordt automatisch huishouden `frank`; frank en
+kimberley delen dat huishouden, dus voor hen verandert niets. Het krijgt de naam "Huishouden Van
+Alphen". De migratie draait idempotent bij elke start (`ADD COLUMN IF NOT EXISTS`, backfill van
+`household` en van de `households`-tabel).
+
+**Beheer.** De admin-gebruiker (`is_admin`, standaard `frank`) ziet in de zijbalk *Huishoudens &
+accounts*. Daar maak je eerst een huishouden aan (naam + korte sleutel), en koppel je er vervolgens
+één of meer accounts aan. Elk account levert een tijdelijk wachtwoord op dat je doorgeeft; de
+gebruiker moet het bij de eerste login wijzigen (`must_change`). Accounts kun je ook weer
+verwijderen — behalve je eigen admin-account, om buitensluiten te voorkomen. Endpoints:
+`GET/POST /api/admin/households`, `POST /api/admin/accounts`, `DELETE /api/admin/accounts/:username`,
+alle afgeschermd door `requireAdmin` (401 zonder login, 403 zonder admin-recht). De frontend zit in
+`admin.jsx`.
+
+**Verantwoordelijkheid.** Wie andermans financiële data host, is onder de AVG verwerkings-
+verantwoordelijke: backups, beschikbaarheid en het melden van datalekken liggen bij de beheerder.
+
 ## Security-samenvatting
 
 **Wachtwoorden:** scrypt met willekeurig salt en timing-safe vergelijking; de kosten staan in de hash zelf (`scrypt$N$r$p$salt$hash`, nu N=65536 ≈ 64 MB per poging). Oude hashes (`salt:hash`, Node-standaardkosten) blijven werken en worden bij een geslaagde login stilletjes omgezet naar de zwaardere kosten — niemand raakt buitengesloten. Hashen gebeurt asynchroon, dus inloggen blokkeert de server niet. Bij een onbekende gebruikersnaam wordt hetzelfde werk gedaan (geen enumeratie via responstijd).
@@ -54,52 +86,29 @@ Gezamenlijk huishoudboekje voor Frank & Kimberley: ING-import, categorisatie via
 
 ## Bundels & tikkies
 
-Een **bundel** is een groep transacties met hetzelfde label (`bundle` op de transactie). Je zet het
-label bij het verwerken of via de transactieregel; het datalist-veld stelt bestaande labels voor.
+Eén systeem voor het delen van uitgaven — geen los voorschot meer, geen automatische herkenning.
 
-Werkwijze: bundel eerst de uitgaven (bijv. een weekend weg), open dan **Tikkies & delen → Delen**
-en klik op **Delen door 2/3/4/5** — of "meer dan 5…" om zelf een aantal te typen. Dat aantal is
-*inclusief jezelf*; de app maakt de overige personen aan, die je een naam kunt geven.
+**Een bundel maken.** Op het tabblad *Tikkies & delen* klik je op *+ Nieuwe bundel*, geeft een naam,
+en vinkt de bestaande transacties aan die erbij horen. De bundel toont het totaal.
 
-**Afronding volgt de tikkie-praktijk.** Het deel van de anderen wordt naar BOVEN afgerond op hele
-centen (`Math.ceil`), want dat is het bedrag dat je als tikkie verstuurt. Jouw eigen deel is het
-restant: `totaal − deel × aantal anderen`. Daardoor is jouw deel hooguit een paar cent kleiner dan
-dat van de rest. Voorbeeld: bundel van € 500,03 met z'n vijven → vier tikkies van € 100,01 (samen
-€ 400,04), jouw deel € 99,99. De optelsom klopt altijd exact: jouw deel + terugverwacht = bundeltotaal.
+**Verdelen (per bundel te kiezen).**
+- *Gelijk delen*: het totaal wordt gedeeld door het aantal personen. Met de schakelaar *Ik doe zelf
+  mee* bepaal je of jij als betaler meetelt (dan deel je door personen + 1). Ieders deel wordt naar
+  boven afgerond (een tikkie kent geen halve centen); jouw eigen deel is de rest.
+- *Bedrag per persoon*: iedereen begint op een gelijk deel, maar je past enkelingen handmatig aan.
+  Klopt de som niet met het totaal, dan toont de app het verschil (onverdeeld of te veel) — je beslist
+  zelf, er wordt niet automatisch herverdeeld.
 
-**Betaalde tikkies worden herkend.** `bundleSuggestions()` zoekt per persoon de meest waarschijnlijke
-binnengekomen betaling en toont die als voorstel; één klik op *Koppel* verrekent hem. Bij meerdere
-voorstellen verschijnt *Koppel alle N*. Score: exact het openstaande bedrag = 3 punten, een paar cent
-ernaast = 1, naam-match = 3; vanaf 3 punten volgt een voorstel, vanaf 6 heet het "Betaald door" in
-plaats van "Mogelijk". Alleen betalingen ná de eerste bundeluitgave tellen mee, en de toewijzing is
-greedy: dezelfde transactie wordt nooit aan twee personen voorgesteld. Voorstellen lopen via `allBundleSuggestions` met één
-gedeelde claim-set, zodat dezelfde binnengekomen betaling nooit bij twee bundels tegelijk wordt
-voorgesteld. Betaalt iemand te veel, dan koppelt de app exact het openstaande deel en toont het
-restant ("… blijft over"). Bij twijfel doet hij liever
-niets — een fout voorstel is duurder dan geen voorstel.
+**Afhandelen.** Per persoon vink je *betaald* aan zodra ze getikt hebben. Zodra iedereen is
+afgevinkt, wordt de knop *Afhandelen* actief en verhuist de bundel naar *Afgehandelde tikkies*.
+Vergist? Met *Heropenen* (achter een bevestiging) zet je hem terug op open. De transacties in een
+bundel kun je altijd zien en aanpassen (in-/uitklappen, eruit halen).
 
-Namen matchen via `nameTokens()` (woorden vanaf 3 letters, dus aanhef en initialen tellen niet mee).
-`cleanPayerName()` maakt van het ING-naamveld een bruikbare naam: "Hr M Lagendijk" → "M Lagendijk",
-"Hr RW Boekestijn,Mw E Knoester" → "RW Boekestijn", "… via ASN Bank Betaalverzoek" → de persoon
-ervoor. Accepteer je een voorstel, dan wordt die naam ingevuld — maar alléén zolang de naam nog de
-door de app verzonnen "Persoon N" is (`isDefaultPersonName`); een naam die jij zelf typte blijft staan.
-
-Komt er geld binnen dat hij niet herkent, dan koppel je het zelf via *kies een betaling…*. Deelbetalingen
-mogen: iemand blijft "open" tot zijn deel vol is, en één inkomende transactie kan aan meerdere personen
-in meerdere bundels hangen (`unassignedOf` bewaakt dat je niet meer koppelt dan er binnenkwam).
-Gekoppeld geld wordt **proportioneel over de héle bundel** teruggeboekt, niet volledig tegen één
-uitgave. Bij een bundel van 300 + 100 + 75 + 25 gedeeld door 5 gaat van elke betaling van € 100 dus
-automatisch € 60 naar de 300, € 20 naar de 100, € 15 naar de 75 en € 5 naar de 25. Voorschotten en bundels staan samen op het tabblad **Tikkies & delen**; de knop op Transacties verwijst ernaartoe.
-
-**Datamodel.** `state.bundles = [{ key, naam, people: [{ id, naam }] }]`, waarbij `key` het label in
-kleine letters is en `people` alleen de ánderen bevat (jij bent impliciet +1). De bundel zelf bestaat
-door de labels op de transacties; `state.bundles` hangt er alleen de deel-informatie aan. Een label
-zonder personen is gewoon een niet-gedeelde bundel — die blijft werken zoals voorheen. Betalingen zijn
-settlements met `{ bundleKey, personId, amountCents }` naast de bestaande voorschot-vorm
-`{ advanceId, amountCents }`; beide vormen leven naast elkaar in `settlements`.
-
-**Bundel verwijderen** haalt alleen het label bij de transacties weg (en ruimt de koppelingen op).
-De transacties zelf blijven altijd staan.
+**Datamodel.** Een bundel is een zelfstandig object in `state.bundles`:
+`{ id, naam, txIds:[], verdeelModus:"personen"|"bedrag", ikDoeMee:bool,
+personen:[{id,naam,bedragCents|null,betaald:bool}], afgehandeld:bool }`. De rekenkern zit in
+`financieel.js` (`bundleStand`, `gelijkDeelCents`, `bundleTxnsById`, `bundleTotalById`). Er zijn geen
+`settlements` op transacties meer en geen tikkie-herkenning.
 
 ## Importeren
 

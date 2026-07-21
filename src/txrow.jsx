@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback, useEffect, useRef } from "react"
 import { useHuishoudboekje } from "./store.jsx";
 import { uploadAttachment, listAttachments, deleteAttachment, attachmentUrl } from "./api.js";
 import { formatEUR, fmtDateTime, batchColor, effMonth, effYear } from "./lib.js";
-import { savingsCatForTx, derivedPotMutation, catAllowed, guessKeyword, rankSuggestions, settlementsOf, unassignedOf } from "./financieel.js";
+import { savingsCatForTx, derivedPotMutation, catAllowed, guessKeyword, rankSuggestions } from "./financieel.js";
 import { T, Btn, MoneyInput, inputStyle, CatSelect, Chip, Icon, Toggle, PeriodControl} from "./ui.jsx";
 
 // ---- De transactieregel ----
@@ -36,27 +36,6 @@ function RuleLearn({ tx, categoryId, onAddRule }) {
 }
 
 const TX_COLS = "78px 1fr 96px 200px 40px 34px";
-
-function ExpectedBackEditor({ amountCents, value, onChange }) {
-  const full = Math.abs(amountCents);
-  const cur = value != null ? value : full;
-  return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <span style={{ fontSize: 12, color: T.sub }}>Verwacht terug:</span>
-      <MoneyInput cents={cur} width={100} onChange={onChange} />
-      <span style={{ fontSize: 11.5, color: T.sub }}>van {formatEUR(full)}</span>
-      <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-        <span style={{ fontSize: 11, color: T.sub }}>delen door</span>
-        {[2, 3, 4, 5, 6].map((n) => (
-          <button key={n} onClick={() => onChange(Math.round((full * (n - 1)) / n))} title={`Samen met ${n} personen: jij houdt ${formatEUR(Math.round(full / n))}, je verwacht ${formatEUR(Math.round((full * (n - 1)) / n))} terug`} style={{ border: `1px solid ${T.line}`, background: "#fff", color: T.accent, borderRadius: 6, padding: "2px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>÷{n}</button>
-        ))}
-      </span>
-    </div>
-  );
-}
-// Laat op een transactie zien wat er met het Vermogen gebeurt op basis van de mededelingen:
-// groen = de vermogensrekening wordt automatisch bij-/afgeboekt; oranje = er staat een expliciete
-// spaarcode in de mededelingen die nog aan geen enkele rekening gekoppeld is.
 function VermogenHint({ tx, categories }) {
   const d = derivedPotMutation(tx, categories);
   if (d) {
@@ -376,25 +355,6 @@ function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [
             <span style={{ fontSize: 12, color: T.sub, width: 64 }}>Notitie</span>
             <input value={tx.note || ""} onChange={(e) => onSetNote(tx.id, e.target.value)} placeholder="bijv. voorgeschoten voor Maud" style={{ ...inputStyle, fontSize: 13, padding: "6px 10px" }} />
           </div>
-          {onSaveOne && (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: T.sub, width: 64 }}>Bundel</span>
-              <input value={tx.bundle || ""} list="bundel-labels" onChange={(e) => onSaveOne(tx.id, { bundle: e.target.value })} placeholder="bijv. Verjaardag Maud — telt los op bij Uitgaven › Bundels" style={{ ...inputStyle, fontSize: 13, padding: "6px 10px" }} />
-            </div>
-          )}
-          {onSaveOne && settlementsOf(tx).length === 0 && (
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <span style={{ fontSize: 12, color: T.sub, width: 64, paddingTop: 4 }}>Tikkie</span>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
-                <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-                  <Toggle on={!!tx.advance} onClick={() => onSaveOne(tx.id, tx.advance ? { advance: false } : { advance: true, expectedBackCents: Math.abs(tx.amountCents) })} />
-                  <span>Ik ga hier een tikkie voor sturen — verwacht (deels) terug</span>
-                </label>
-                {tx.advance && <ExpectedBackEditor amountCents={tx.amountCents} value={tx.expectedBackCents} onChange={(v) => onSaveOne(tx.id, { expectedBackCents: v })} />}
-              </div>
-            </div>
-          )}
-          {settlementsOf(tx).length > 0 && <div style={{ fontSize: 12.5, color: T.pos, fontWeight: 600, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}><span>✓ Gekoppeld aan {settlementsOf(tx).length === 1 ? "een tikkie" : `${settlementsOf(tx).length} tikkies`}{unassignedOf(tx) > 0 ? ` · nog ${formatEUR(unassignedOf(tx))} vrij` : ""} · beheren onder Tikkies</span>{onSaveOne && <button onClick={() => onSaveOne(tx.id, { settledWith: undefined, settlements: [], allocations: [] })} style={{ border: "none", background: "transparent", color: T.accent, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>ontkoppel</button>}</div>}
           {onSaveOne && <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ fontSize: 12, color: T.sub, width: 64 }}>Periode</span><PeriodControl tx={tx} years={years} onChange={(pd) => onSaveOne(tx.id, { periodDate: pd })} /></div>}
           {!splitting && (
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
@@ -414,4 +374,4 @@ const TxRow = React.memo(TxRowBase, (a, b) =>
   a.tx === b.tx && a.categories === b.categories && a.rules === b.rules && a.years === b.years && a.newBatchId === b.newBatchId && a.groups === b.groups && a.history === b.history
 );
 
-export { ExpectedBackEditor, VermogenHint, PostPicker, SplitEditor, fileToUploadPayload, Bijlagen, TaakKnop, TxRowBase, TxRow, TX_COLS, RuleLearn };
+export { VermogenHint, PostPicker, SplitEditor, fileToUploadPayload, Bijlagen, TaakKnop, TxRowBase, TxRow, TX_COLS, RuleLearn };

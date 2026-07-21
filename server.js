@@ -78,8 +78,8 @@ const COOKIE_SECURE = process.env.COOKIE_INSECURE !== "true";
    worden nooit aangeraakt (ON CONFLICT DO NOTHING). */
 const genTempPw = () => crypto.randomBytes(9).toString("base64url");
 const SEED_USERS = [
-  { username: "frank", displayName: "Frank van Alphen", tempPassword: process.env.FRANK_TEMP_PW || genTempPw() },
-  { username: "kimberley", displayName: "Kimberley Lagendijk", tempPassword: process.env.KIMBERLEY_TEMP_PW || genTempPw() },
+  { username: "frank", displayName: "Frank van Alphen", household: "frank", isAdmin: true, tempPassword: process.env.FRANK_TEMP_PW || genTempPw() },
+  { username: "kimberley", displayName: "Kimberley Lagendijk", household: "frank", isAdmin: false, tempPassword: process.env.KIMBERLEY_TEMP_PW || genTempPw() },
 ];
 
 /* ---- Wachtwoord-hashing (scrypt, ingebouwd in Node) ----
@@ -160,10 +160,11 @@ function parseCookies(req) {
 /* ---- Opslag: PostgreSQL indien beschikbaar, anders tijdelijk geheugen ---- */
 let pool = null;
 let dbReady = false;
-let memUsers = null;          // Map username -> {username, displayName, passwordHash, mustChange}
-let memState = null;          // {data, updatedBy, updatedAt}
-let memLog = [];              // [{username, displayName, action, at}]
-let memAttach = [];           // fallback zonder database: [{id, txId, filename, mime, sizeBytes, data(Buffer), by, at}]
+let memUsers = null;          // Map username -> {username, displayName, passwordHash, mustChange, household, isAdmin}
+let memHouseholds = new Map();// household-key -> naam (memory-modus)swordHash, mustChange}
+let memState = new Map();     // household -> {data, updatedBy, updatedAt, rev}
+let memLog = new Map();       // household -> [{username, displayName, action, at}]
+let memAttach = new Map();    // household -> [{id, txId, filename, ...}]  (fallback zonder database)ame, mime, sizeBytes, data(Buffer), by, at}]
 let memAttachId = 1;
 
 if (process.env.DATABASE_URL) {
@@ -186,22 +187,55 @@ async function initDb() {
         CONSTRAINT app_state_single CHECK (id = 1))`);
       await pool.query(`ALTER TABLE app_state ADD COLUMN IF NOT EXISTS updated_by text`);
       await pool.query(`ALTER TABLE app_state ADD COLUMN IF NOT EXISTS rev bigint NOT NULL DEFAULT 0`);
+        // Multi-tenant: household erbij; de oude enkele rij (id=1) wordt huishouden 'frank'.
+        await pool.query(`ALTER TABLE app_state ADD COLUMN IF NOT EXISTS household text`);
+        await pool.query(`UPDATE app_state SET household = 'frank' WHERE household IS NULL`);
+        await pool.query(`ALTER TABLE app_state DROP CONSTRAINT IF EXISTS app_state_single`);
+        // id was een vaste 1 (single-row). Nu meerdere rijen: geef id een sequence zodat elke
+        // nieuwe huishoud-rij automatisch een uniek id krijgt. Bestaande rij (id=1) blijft.
+        await pool.query(`CREATE SEQUENCE IF NOT EXISTS app_state_id_seq OWNED BY app_state.id`);
+        await pool.query(`SELECT setval('app_state_id_seq', GREATEST((SELECT COALESCE(MAX(id),0) FROM app_state), 1))`);
+        await pool.query(`ALTER TABLE app_state ALTER COLUMN id SET DEFAULT nextval('app_state_id_seq')`);
+        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS app_state_household_idx ON app_state (household)`);
       await pool.query(`CREATE TABLE IF NOT EXISTS state_snapshots (
         id bigserial PRIMARY KEY, data jsonb NOT NULL,
         updated_by text, rev bigint, at timestamptz NOT NULL DEFAULT now())`);
+        await pool.query(`ALTER TABLE state_snapshots ADD COLUMN IF NOT EXISTS household text`);
+        await pool.query(`UPDATE state_snapshots SET household = 'frank' WHERE household IS NULL`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS state_snapshots_hh_idx ON state_snapshots (household, id DESC)`);
       await pool.query(`CREATE TABLE IF NOT EXISTS users (
         username text PRIMARY KEY, display_name text NOT NULL,
         password_hash text NOT NULL, must_change boolean NOT NULL DEFAULT true,
         created_at timestamptz NOT NULL DEFAULT now())`);
+        await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS household text`);
+        await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false`);
+        await pool.query(`UPDATE users SET household = 'frank' WHERE household IS NULL AND username IN ('frank','kimberley')`);
+        await pool.query(`UPDATE users SET household = username WHERE household IS NULL`);
+        await pool.query(`UPDATE users SET is_admin = true WHERE username = 'frank'`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS users_household_idx ON users (household)`);
+        // Huishoudens als eigen tabel: een leesbare naam per huishoud-sleutel. De sleutel (households.key)
+        // is wat op users.household staat en wat de data-scheiding stuurt; de naam is puur cosmetisch.
+        await pool.query(`CREATE TABLE IF NOT EXISTS households (
+          key text PRIMARY KEY, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())`);
+        // Backfill: voor elke bestaande huishoud-sleutel op users een rij aanmaken als die nog niet bestaat.
+        await pool.query(`INSERT INTO households (key, name)
+          SELECT DISTINCT household, household FROM users WHERE household IS NOT NULL
+          ON CONFLICT (key) DO NOTHING`);
+        // Het huishouden van frank+kimberley een nette naam geven (alleen als het nog de kale sleutel is).
+        await pool.query(`UPDATE households SET name = 'Huishouden Van Alphen' WHERE key = 'frank' AND name = 'frank'`);
       await pool.query(`CREATE TABLE IF NOT EXISTS audit_log (
         id bigserial PRIMARY KEY, username text NOT NULL, display_name text NOT NULL,
         action text NOT NULL, at timestamptz NOT NULL DEFAULT now())`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at DESC, id DESC)`);
+        await pool.query(`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS household text`);
+        await pool.query(`UPDATE audit_log SET household = 'frank' WHERE household IS NULL`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (household, at DESC, id DESC)`);
       await pool.query(`CREATE TABLE IF NOT EXISTS attachments (
         id bigserial PRIMARY KEY, tx_id text NOT NULL, filename text NOT NULL,
         mime text NOT NULL, size_bytes integer NOT NULL, data bytea NOT NULL,
         uploaded_by text, at timestamptz NOT NULL DEFAULT now())`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS attachments_tx_idx ON attachments (tx_id)`);
+        await pool.query(`ALTER TABLE attachments ADD COLUMN IF NOT EXISTS household text`);
+        await pool.query(`UPDATE attachments SET household = 'frank' WHERE household IS NULL`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS attachments_tx_idx ON attachments (household, tx_id)`);
       dbReady = true;
       console.log("Verbonden met database — gebruikers, logboek en data worden blijvend opgeslagen.");
     } catch (e) {
@@ -218,9 +252,9 @@ async function ensureSeedUsers() {
   if (dbReady) {
     for (const u of SEED_USERS) {
       const r = await pool.query(
-        `INSERT INTO users (username, display_name, password_hash, must_change)
-         VALUES ($1, $2, $3, true) ON CONFLICT (username) DO NOTHING RETURNING username`,
-        [u.username, u.displayName, await hashPassword(u.tempPassword)]
+        `INSERT INTO users (username, display_name, password_hash, must_change, household, is_admin)
+         VALUES ($1, $2, $3, true, $4, $5) ON CONFLICT (username) DO NOTHING RETURNING username`,
+        [u.username, u.displayName, await hashPassword(u.tempPassword), u.household || u.username, !!u.isAdmin]
       );
       // Alleen bij een écht nieuw account het tijdelijke wachtwoord tonen (bestaande accounts: niets loggen).
       if (r.rows[0] && !process.env[`${u.username.toUpperCase()}_TEMP_PW`])
@@ -228,9 +262,10 @@ async function ensureSeedUsers() {
     }
   } else {
     memUsers = new Map();
+    memHouseholds.set("frank", "Huishouden Van Alphen");
     for (const u of SEED_USERS)
       {
-      memUsers.set(u.username, { username: u.username, displayName: u.displayName, passwordHash: await hashPassword(u.tempPassword), mustChange: true });
+      memUsers.set(u.username, { username: u.username, displayName: u.displayName, passwordHash: await hashPassword(u.tempPassword), mustChange: true, household: u.household || u.username, isAdmin: !!u.isAdmin });
       if (!process.env[`${u.username.toUpperCase()}_TEMP_PW`]) console.log(`Tijdelijk account "${u.username}" (geheugenmodus). Tijdelijk wachtwoord: ${u.tempPassword}`);
     }
   }
@@ -238,10 +273,10 @@ async function ensureSeedUsers() {
 
 async function findUser(username) {
   if (dbReady) {
-    const r = await pool.query(`SELECT username, display_name, password_hash, must_change FROM users WHERE username = $1`, [username]);
+    const r = await pool.query(`SELECT username, display_name, password_hash, must_change, household, is_admin FROM users WHERE username = $1`, [username]);
     if (!r.rows[0]) return null;
     const x = r.rows[0];
-    return { username: x.username, displayName: x.display_name, passwordHash: x.password_hash, mustChange: x.must_change };
+    return { username: x.username, displayName: x.display_name, passwordHash: x.password_hash, mustChange: x.must_change, household: x.household || x.username, isAdmin: !!x.is_admin };
   }
   return (memUsers && memUsers.get(username)) || null;
 }
@@ -252,6 +287,72 @@ async function listUsers() {
   }
   return [...(memUsers ? memUsers.values() : [])].map((u) => ({ username: u.username, displayName: u.displayName }));
 }
+// Huishoudens met hun gekoppelde accounts, voor de admin-pagina.
+async function listHouseholdsWithAccounts() {
+  if (dbReady) {
+    const h = await pool.query(`SELECT key, name FROM households ORDER BY name`);
+    const u = await pool.query(`SELECT username, display_name, household, is_admin, must_change FROM users ORDER BY display_name`);
+    return h.rows.map((hh) => ({
+      key: hh.key, name: hh.name,
+      accounts: u.rows.filter((x) => x.household === hh.key).map((x) => ({ username: x.username, displayName: x.display_name, isAdmin: !!x.is_admin, mustChange: x.must_change })),
+    }));
+  }
+  const out = [];
+  for (const [key, name] of memHouseholds) {
+    out.push({ key, name, accounts: [...memUsers.values()].filter((u) => u.household === key).map((u) => ({ username: u.username, displayName: u.displayName, isAdmin: !!u.isAdmin, mustChange: u.mustChange })) });
+  }
+  return out;
+}
+const slug = (s) => String(s || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+// Een huishouden aanmaken (alleen de container; accounts koppel je er los aan).
+async function createHouseholdRecord(key, name) {
+  const k = slug(key);
+  const naam = String(name || "").trim() || k;
+  if (!k || k.length < 2) return { error: "ongeldige-naam" };
+  if (dbReady) {
+    const bestaat = await pool.query(`SELECT 1 FROM households WHERE key = $1`, [k]);
+    if (bestaat.rows[0]) return { error: "bestaat-al" };
+    await pool.query(`INSERT INTO households (key, name) VALUES ($1, $2)`, [k, naam]);
+  } else {
+    if (memHouseholds.has(k)) return { error: "bestaat-al" };
+    memHouseholds.set(k, naam);
+  }
+  return { key: k, name: naam };
+}
+// Een account aanmaken en aan een bestaand huishouden koppelen. Geeft het tijdelijke wachtwoord terug.
+async function createAccount(household, username, displayName) {
+  const hk = slug(household);
+  const uname = slug(username);
+  const naam = String(displayName || "").trim() || uname;
+  if (!uname || uname.length < 2) return { error: "ongeldige-gebruikersnaam" };
+  // het huishouden moet bestaan
+  if (dbReady) { const h = await pool.query(`SELECT 1 FROM households WHERE key = $1`, [hk]); if (!h.rows[0]) return { error: "huishouden-onbekend" }; }
+  else if (!memHouseholds.has(hk)) return { error: "huishouden-onbekend" };
+  if (await findUser(uname)) return { error: "gebruiker-bestaat-al" };
+  const tempPw = crypto.randomBytes(9).toString("base64url");
+  const hash = await hashPassword(tempPw);
+  if (dbReady) {
+    await pool.query(
+      `INSERT INTO users (username, display_name, password_hash, must_change, household, is_admin)
+       VALUES ($1, $2, $3, true, $4, false)`,
+      [uname, naam, hash, hk]
+    );
+  } else {
+    memUsers.set(uname, { username: uname, displayName: naam, passwordHash: hash, mustChange: true, household: hk, isAdmin: false });
+  }
+  return { username: uname, displayName: naam, household: hk, tempPassword: tempPw };
+}
+// Een account verwijderen. De admin kan zichzelf niet verwijderen (anders sluit je jezelf buiten).
+async function deleteAccount(username, byUsername) {
+  const uname = slug(username);
+  if (!uname) return { error: "ongeldig" };
+  if (uname === slug(byUsername)) return { error: "niet-jezelf" };
+  const u = await findUser(uname);
+  if (!u) return { error: "onbekend" };
+  if (dbReady) await pool.query(`DELETE FROM users WHERE username = $1`, [uname]);
+  else memUsers.delete(uname);
+  return { ok: true, username: uname, household: u.household };
+}
 // Alleen de hash vervangen (kosten-upgrade); raakt must_change bewust NIET aan.
 async function updatePasswordHash(username, hash) {
   if (dbReady) await pool.query(`UPDATE users SET password_hash = $1 WHERE username = $2`, [hash, username]);
@@ -261,74 +362,77 @@ async function setUserPassword(username, hash) {
   if (dbReady) await pool.query(`UPDATE users SET password_hash = $1, must_change = false WHERE username = $2`, [hash, username]);
   else { const u = memUsers.get(username); if (u) { u.passwordHash = hash; u.mustChange = false; } }
 }
-async function readState() {
+async function readState(household) {
   if (dbReady) {
-    const r = await pool.query(`SELECT data, updated_by, updated_at, rev FROM app_state WHERE id = 1`);
+    const r = await pool.query(`SELECT data, updated_by, updated_at, rev FROM app_state WHERE household = $1`, [household]);
     if (!r.rows[0]) return { state: null, rev: 0 };
     return { state: r.rows[0].data, updatedBy: r.rows[0].updated_by, updatedAt: r.rows[0].updated_at, rev: Number(r.rows[0].rev) || 0 };
   }
-  return memState ? { state: memState.data, updatedBy: memState.updatedBy, updatedAt: memState.updatedAt, rev: memState.rev || 0 } : { state: null, rev: 0 };
+  const ms = memState.get(household);
+  return ms ? { state: ms.data, updatedBy: ms.updatedBy, updatedAt: ms.updatedAt, rev: ms.rev || 0 } : { state: null, rev: 0 };
 }
 // Slaat op met optimistische concurrency: alleen als expectedRev overeenkomt met de huidige rev.
 // Bij null expectedRev wordt de check overgeslagen (bijv. eerste seed). Geeft de nieuwe rev terug,
-// of { conflict: true, current } als een ander intussen heeft opgeslagen.
-async function writeState(data, updatedBy, expectedRev) {
+// of { conflict: true, current } als een ander intussen heeft opgeslagen. Altijd per huishouden.
+async function writeState(household, data, updatedBy, expectedRev) {
   if (dbReady) {
-    // Atomair: rev-controle en verhoging in één UPDATE, zodat twee gelijktijdige saves
-    // elkaar nooit stilletjes kunnen overschrijven (geen race tussen lezen en schrijven).
+    // Atomair: rev-controle en verhoging in één UPDATE, per huishouden, zodat twee gelijktijdige
+    // saves elkaar nooit stilletjes overschrijven (geen race tussen lezen en schrijven).
     const upd = await pool.query(
       `UPDATE app_state SET data = $1, updated_by = $2, updated_at = now(), rev = rev + 1
-       WHERE id = 1 AND ($3::bigint IS NULL OR rev = $3::bigint) RETURNING rev`,
-      [data, updatedBy, expectedRev]
+       WHERE household = $4 AND ($3::bigint IS NULL OR rev = $3::bigint) RETURNING rev`,
+      [data, updatedBy, expectedRev, household]
     );
-    if (upd.rows[0]) { const rev = Number(upd.rows[0].rev); await saveSnapshot(data, updatedBy, rev); return { rev }; }
-    // Geen rij geraakt: óf de rij bestaat nog niet (eerste seed), óf de rev klopte niet (conflict).
+    if (upd.rows[0]) { const rev = Number(upd.rows[0].rev); await saveSnapshot(household, data, updatedBy, rev); return { rev }; }
+    // Geen rij geraakt: óf de rij bestaat nog niet (eerste seed van dit huishouden), óf rev-conflict.
     const ins = await pool.query(
-      `INSERT INTO app_state (id, data, updated_by, updated_at, rev) VALUES (1, $1, $2, now(), 1)
-       ON CONFLICT (id) DO NOTHING RETURNING rev`,
-      [data, updatedBy]
+      `INSERT INTO app_state (household, data, updated_by, updated_at, rev) VALUES ($3, $1, $2, now(), 1)
+       ON CONFLICT (household) DO NOTHING RETURNING rev`,
+      [data, updatedBy, household]
     );
-    if (ins.rows[0]) { await saveSnapshot(data, updatedBy, 1); return { rev: 1 }; }
-    const full = await readState();
+    if (ins.rows[0]) { await saveSnapshot(household, data, updatedBy, 1); return { rev: 1 }; }
+    const full = await readState(household);
     return { conflict: true, current: full };
   }
-  const curRev = memState ? (memState.rev || 0) : 0;
-  if (expectedRev != null && memState && curRev !== Number(expectedRev)) {
-    return { conflict: true, current: { state: memState.data, updatedBy: memState.updatedBy, updatedAt: memState.updatedAt, rev: curRev } };
+  const ms = memState.get(household);
+  const curRev = ms ? (ms.rev || 0) : 0;
+  if (expectedRev != null && ms && curRev !== Number(expectedRev)) {
+    return { conflict: true, current: { state: ms.data, updatedBy: ms.updatedBy, updatedAt: ms.updatedAt, rev: curRev } };
   }
-  memState = { data, updatedBy, updatedAt: new Date().toISOString(), rev: curRev + 1 };
+  memState.set(household, { data, updatedBy, updatedAt: new Date().toISOString(), rev: curRev + 1 });
   return { rev: curRev + 1 };
 }
-async function saveSnapshot(data, updatedBy, rev) {
+async function saveSnapshot(household, data, updatedBy, rev) {
   try {
-    await pool.query(`INSERT INTO state_snapshots (data, updated_by, rev) VALUES ($1, $2, $3)`, [data, updatedBy, rev]);
-    await pool.query(`DELETE FROM state_snapshots WHERE id NOT IN (SELECT id FROM state_snapshots ORDER BY id DESC LIMIT 40)`);
+    await pool.query(`INSERT INTO state_snapshots (household, data, updated_by, rev) VALUES ($4, $1, $2, $3)`, [data, updatedBy, rev, household]);
+    await pool.query(`DELETE FROM state_snapshots WHERE household = $1 AND id NOT IN (SELECT id FROM state_snapshots WHERE household = $1 ORDER BY id DESC LIMIT 40)`, [household]);
   } catch (e) { console.error("Snapshot mislukt:", e.message); }
 }
-async function listSnapshots(limit) {
+async function listSnapshots(household, limit) {
   if (dbReady) {
-    const r = await pool.query(`SELECT id, updated_by, rev, at FROM state_snapshots ORDER BY id DESC LIMIT $1`, [limit]);
+    const r = await pool.query(`SELECT id, updated_by, rev, at FROM state_snapshots WHERE household = $2 ORDER BY id DESC LIMIT $1`, [limit, household]);
     return r.rows.map((x) => ({ id: x.id, updatedBy: x.updated_by, rev: Number(x.rev), at: x.at }));
   }
   return [];
 }
-async function readSnapshot(id) {
+async function readSnapshot(household, id) {
   if (dbReady) {
-    const r = await pool.query(`SELECT data FROM state_snapshots WHERE id = $1`, [id]);
+    // household in de WHERE: je kunt nooit een snapshot van een ander huishouden opvragen.
+    const r = await pool.query(`SELECT data FROM state_snapshots WHERE id = $1 AND household = $2`, [id, household]);
     return r.rows[0] ? r.rows[0].data : null;
   }
   return null;
 }
-async function addLog(username, displayName, action) {
-  if (dbReady) await pool.query(`INSERT INTO audit_log (username, display_name, action) VALUES ($1, $2, $3)`, [username, displayName, action]);
-  else { memLog.unshift({ username, displayName, action, at: new Date().toISOString() }); memLog = memLog.slice(0, 250); }
+async function addLog(household, username, displayName, action) {
+  if (dbReady) await pool.query(`INSERT INTO audit_log (household, username, display_name, action) VALUES ($4, $1, $2, $3)`, [username, displayName, action, household]);
+  else { const arr = memLog.get(household) || []; arr.unshift({ username, displayName, action, at: new Date().toISOString() }); memLog.set(household, arr.slice(0, 250)); }
 }
-async function getActivity(limit) {
+async function getActivity(household, limit) {
   if (dbReady) {
-    const r = await pool.query(`SELECT username, display_name, action, at FROM audit_log ORDER BY at DESC, id DESC LIMIT $1`, [limit]);
+    const r = await pool.query(`SELECT username, display_name, action, at FROM audit_log WHERE household = $2 ORDER BY at DESC, id DESC LIMIT $1`, [limit, household]);
     return r.rows.map((x) => ({ username: x.username, displayName: x.display_name, action: x.action, at: x.at }));
   }
-  return memLog.slice(0, limit);
+  return (memLog.get(household) || []).slice(0, limit);
 }
 
 /* ---- Middleware ---- */
@@ -347,6 +451,15 @@ const requireAuth = ah(async (req, res, next) => {
   const u = await currentUser(req);
   if (!u) return res.status(401).json({ error: "unauthorized" });
   if (u.mustChange) return res.status(403).json({ error: "must-change" });
+  req.user = u; req.username = u.username;
+  next();
+});
+// Alleen een ingelogde admin (frank) mag huishoudens beheren.
+const requireAdmin = ah(async (req, res, next) => {
+  const u = await currentUser(req);
+  if (!u) return res.status(401).json({ error: "unauthorized" });
+  if (u.mustChange) return res.status(403).json({ error: "must-change" });
+  if (!u.isAdmin) return res.status(403).json({ error: "geen-admin" });
   req.user = u; req.username = u.username;
   next();
 });
@@ -373,7 +486,7 @@ app.get("/api/users", ah(async (req, res) => res.json({ users: await listUsers()
 app.get("/api/me", ah(async (req, res) => {
   const u = await currentUser(req);
   if (!u) return res.json({ authed: false, db: dbReady });
-  res.json({ authed: true, user: { username: u.username, displayName: u.displayName }, mustChange: u.mustChange, db: dbReady });
+  res.json({ authed: true, user: { username: u.username, displayName: u.displayName }, mustChange: u.mustChange, isAdmin: !!u.isAdmin, db: dbReady });
 }));
 
 app.post("/api/login", ah(async (req, res) => {
@@ -391,7 +504,7 @@ app.post("/api/login", ah(async (req, res) => {
   if (v.needsUpgrade) { try { u.passwordHash = await hashPassword(password || ""); await updatePasswordHash(u.username, u.passwordHash); } catch (e) { console.error("Hash-upgrade mislukt:", e.message); } }
   ipHits.delete(ip); userHits.delete(uname.toLowerCase());
   res.setHeader("Set-Cookie", cookieFor(u)); // cookie hangt aan de (mogelijk vernieuwde) hash
-  await addLog(u.username, u.displayName, "ingelogd");
+  await addLog(u.household, u.username, u.displayName, "ingelogd");
   res.json({ ok: true, user: { username: u.username, displayName: u.displayName }, mustChange: u.mustChange, db: dbReady });
 }));
 
@@ -412,7 +525,7 @@ app.post("/api/change-password", requireLogin, ah(async (req, res) => {
   }
   const newHash = await hashPassword(newPassword);
   await setUserPassword(req.username, newHash);
-  await addLog(req.username, req.user.displayName, "wachtwoord gewijzigd");
+  await addLog(req.user.household, req.username, req.user.displayName, "wachtwoord gewijzigd");
   // geef een verse cookie mee (de oude is nu ongeldig omdat hij aan het oude wachtwoord hing)
   res.setHeader("Set-Cookie", cookieFor({ username: req.username, passwordHash: newHash }));
   res.json({ ok: true });
@@ -420,14 +533,14 @@ app.post("/api/change-password", requireLogin, ah(async (req, res) => {
 
 app.post("/api/logout", ah(async (req, res) => {
   const u = await currentUser(req);
-  if (u) await addLog(u.username, u.displayName, "uitgelogd");
+  if (u) await addLog(u.household, u.username, u.displayName, "uitgelogd");
   res.setHeader("Set-Cookie", clearCookie());
   res.json({ ok: true });
 }));
 
 app.get("/api/state", requireAuth, ah(async (req, res) => {
   try {
-    const r = await readState();
+    const r = await readState(req.user.household);
     res.json({ state: r.state == null ? null : r.state, updatedBy: r.updatedBy || null, updatedAt: r.updatedAt || null, rev: r.rev || 0, db: dbReady });
   } catch (e) {
     console.error("State lezen mislukt:", e.message);
@@ -441,7 +554,7 @@ app.put("/api/state", requireAuth, ah(async (req, res) => {
   const expectedRev = req.body && req.body.rev != null ? Number(req.body.rev) : null;
   const by = (req.user && req.user.displayName) || req.username;
   try {
-    const result = await writeState(data, by, expectedRev);
+    const result = await writeState(req.user.household, data, by, expectedRev);
     if (result && result.conflict) {
       // Iemand anders (ander apparaat/gebruiker) heeft intussen opgeslagen.
       return res.status(409).json({ conflict: true, current: result.current, db: dbReady });
@@ -456,14 +569,14 @@ app.put("/api/state", requireAuth, ah(async (req, res) => {
 
 // Lijst van herstelpunten (snapshots).
 app.get("/api/snapshots", requireAuth, ah(async (req, res) => {
-  try { res.json({ snapshots: await listSnapshots(40), db: dbReady }); }
+  try { res.json({ snapshots: await listSnapshots(req.user.household, 40), db: dbReady }); }
   catch (e) { console.error("Snapshots lezen mislukt:", e.message); res.json({ snapshots: [], db: dbReady }); }
 }));
 // Eén snapshot ophalen om te herstellen (client zet 'm daarna via PUT terug).
 app.get("/api/snapshots/:id", requireAuth, ah(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "ongeldig-id" });
-  try { const data = await readSnapshot(id); if (data == null) return res.status(404).json({ error: "niet gevonden" }); res.json({ state: data }); }
+  try { const data = await readSnapshot(req.user.household, id); if (data == null) return res.status(404).json({ error: "niet gevonden" }); res.json({ state: data }); }
   catch (e) { console.error("Snapshot lezen mislukt:", e.message); res.status(500).json({ error: "fout" }); }
 }));
 
@@ -482,40 +595,40 @@ app.post("/api/attachments", requireAuth, ah(async (req, res) => {
   const name = String(filename || "bijlage").slice(0, 140);
   const by = (req.user && req.user.displayName) || req.username;
   if (dbReady) {
-    const r = await pool.query(`INSERT INTO attachments (tx_id, filename, mime, size_bytes, data, uploaded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [txId, name, mime, buf.length, buf, by]);
-    await addLog(req.username, by, `bijlage toegevoegd: ${name}`);
+    const r = await pool.query(`INSERT INTO attachments (tx_id, filename, mime, size_bytes, data, uploaded_by, household) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [txId, name, mime, buf.length, buf, by, req.user.household]);
+    await addLog(req.user.household, req.username, by, `bijlage toegevoegd: ${name}`);
     return res.json({ id: Number(r.rows[0].id) });
   }
   const id = memAttachId++;
-  memAttach.push({ id, txId, filename: name, mime, sizeBytes: buf.length, data: buf, by, at: new Date().toISOString() });
+  { const arr = memAttach.get(req.user.household) || []; arr.push({ id, txId, filename: name, mime, sizeBytes: buf.length, data: buf, by, at: new Date().toISOString() }); memAttach.set(req.user.household, arr); }
   res.json({ id });
 }));
 
 app.get("/api/attachments/counts", requireAuth, ah(async (req, res) => {
   if (dbReady) {
-    const r = await pool.query(`SELECT tx_id, count(*)::int AS n FROM attachments GROUP BY tx_id`);
+    const r = await pool.query(`SELECT tx_id, count(*)::int AS n FROM attachments WHERE household = $1 GROUP BY tx_id`, [req.user.household]);
     const counts = {}; for (const x of r.rows) counts[x.tx_id] = x.n;
     return res.json({ counts });
   }
-  const counts = {}; for (const a of memAttach) counts[a.txId] = (counts[a.txId] || 0) + 1;
+  const counts = {}; for (const a of (memAttach.get(req.user.household) || [])) counts[a.txId] = (counts[a.txId] || 0) + 1;
   res.json({ counts });
 }));
 
 app.get("/api/attachments/tx/:txId", requireAuth, ah(async (req, res) => {
   const txId = String(req.params.txId || "").slice(0, 120);
   if (dbReady) {
-    const r = await pool.query(`SELECT id, filename, mime, size_bytes, uploaded_by, at FROM attachments WHERE tx_id = $1 ORDER BY id DESC`, [txId]);
+    const r = await pool.query(`SELECT id, filename, mime, size_bytes, uploaded_by, at FROM attachments WHERE tx_id = $1 AND household = $2 ORDER BY id DESC`, [txId, req.user.household]);
     return res.json({ attachments: r.rows.map((x) => ({ id: Number(x.id), filename: x.filename, mime: x.mime, sizeBytes: x.size_bytes, by: x.uploaded_by, at: x.at })) });
   }
-  res.json({ attachments: memAttach.filter((a) => a.txId === txId).map(({ data, ...m }) => m).reverse() });
+  res.json({ attachments: (memAttach.get(req.user.household) || []).filter((a) => a.txId === txId).map(({ data, ...m }) => m).reverse() });
 }));
 
 app.get("/api/attachments/:id", requireAuth, ah(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "ongeldig-id" });
   let a = null;
-  if (dbReady) { const r = await pool.query(`SELECT filename, mime, data FROM attachments WHERE id = $1`, [id]); a = r.rows[0] || null; }
-  else { const m = memAttach.find((x) => x.id === id); if (m) a = { filename: m.filename, mime: m.mime, data: m.data }; }
+  if (dbReady) { const r = await pool.query(`SELECT filename, mime, data FROM attachments WHERE id = $1 AND household = $2`, [id, req.user.household]); a = r.rows[0] || null; }
+  else { const m = (memAttach.get(req.user.household) || []).find((x) => x.id === id); if (m) a = { filename: m.filename, mime: m.mime, data: m.data }; }
   if (!a) return res.status(404).json({ error: "niet gevonden" });
   res.setHeader("Content-Type", a.mime);
   // Bestandsnamen mogen alleen latin1 in een HTTP-header. Namen als "kwitantie €50.pdf" of
@@ -532,15 +645,15 @@ app.get("/api/attachments/:id", requireAuth, ah(async (req, res) => {
 app.delete("/api/attachments/:id", requireAuth, ah(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "ongeldig-id" });
-  if (dbReady) await pool.query(`DELETE FROM attachments WHERE id = $1`, [id]);
-  else memAttach = memAttach.filter((a) => a.id !== id);
-  await addLog(req.username, (req.user && req.user.displayName) || req.username, "bijlage verwijderd");
+  if (dbReady) await pool.query(`DELETE FROM attachments WHERE id = $1 AND household = $2`, [id, req.user.household]);
+  else memAttach.set(req.user.household, (memAttach.get(req.user.household) || []).filter((a) => a.id !== id));
+  await addLog(req.user.household, req.username, (req.user && req.user.displayName) || req.username, "bijlage verwijderd");
   res.json({ ok: true });
 }));
 
 app.post("/api/log", requireAuth, ah(async (req, res) => {
   const action = String((req.body && req.body.action) || "").slice(0, 300);
-  if (action) await addLog(req.username, req.user.displayName, action);
+  if (action) await addLog(req.user.household, req.username, req.user.displayName, action);
   res.json({ ok: true });
 }));
 
@@ -557,7 +670,33 @@ app.post("/api/debug-log", requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.get("/api/activity", requireAuth, ah(async (req, res) => res.json({ activity: await getActivity(150) })));
+app.get("/api/activity", requireAuth, ah(async (req, res) => res.json({ activity: await getActivity(req.user.household, 150) })));
+
+// ---- Admin: huishoudens en accounts beheren (alleen voor een admin-gebruiker) ----
+app.get("/api/admin/households", requireAdmin, ah(async (req, res) => {
+  res.json({ households: await listHouseholdsWithAccounts() });
+}));
+app.post("/api/admin/households", requireAdmin, ah(async (req, res) => {
+  const { key, name } = req.body || {};
+  const r = await createHouseholdRecord(key, name);
+  if (r.error) return res.status(400).json({ error: r.error });
+  await addLog(req.user.household, req.username, req.user.displayName, `huishouden aangemaakt: ${r.key}`);
+  res.json({ ok: true, key: r.key, name: r.name });
+}));
+app.post("/api/admin/accounts", requireAdmin, ah(async (req, res) => {
+  const { household, username, displayName } = req.body || {};
+  const r = await createAccount(household, username, displayName);
+  if (r.error) return res.status(400).json({ error: r.error });
+  await addLog(req.user.household, req.username, req.user.displayName, `account ${r.username} gekoppeld aan ${r.household}`);
+  // het tijdelijke wachtwoord gaat één keer terug naar de admin, om door te geven
+  res.json({ ok: true, username: r.username, displayName: r.displayName, household: r.household, tempPassword: r.tempPassword });
+}));
+app.delete("/api/admin/accounts/:username", requireAdmin, ah(async (req, res) => {
+  const r = await deleteAccount(req.params.username, req.username);
+  if (r.error) return res.status(400).json({ error: r.error });
+  await addLog(req.user.household, req.username, req.user.displayName, `account verwijderd: ${r.username}`);
+  res.json({ ok: true });
+}));
 
 /* ---- Statische frontend + SPA-fallback ---- */
 const dist = path.join(__dirname, "dist");

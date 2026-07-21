@@ -1,13 +1,14 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { HuishoudProvider } from "./store.jsx";
 import { me, logout as apiLogout, getState, putState, logAction, attachmentCounts } from "./api.js";
-import { effDate, effYear, effMonth, distributeEven, sumMonths, dedupHash, slug } from "./lib.js";
-import { computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, derivedPotMutation, potFlows, debugLogImport, categorize, settlementsOf, allocsFromSettlements, remainingOf, SLUITPOST_ID, applySluitpost, txYearActuals } from "./financieel.js";
+import { effDate, effYear, effMonth, distributeEven, sumMonths, dedupHash, slug, uid } from "./lib.js";
+import { computeRunningSaldo, bankBalanceFromTxns, saldoChainGaps, openingFromChain, derivedPotMutation, potFlows, debugLogImport, categorize, SLUITPOST_ID, applySluitpost, txYearActuals } from "./financieel.js";
 import { buildSeed, mergeSeed } from "./seed.js";
 import { T, ErrorBoundary, useIsMobile, Icon, icons, Money } from "./ui.jsx";
 import { Uitgaven } from "./uitgaven.jsx";
 import { Transacties } from "./transacties.jsx";
 import { TikkiesEnDelen } from "./tikkies.jsx";
+import { HuishoudBeheer } from "./admin.jsx";
 import { Begroting } from "./begroting.jsx";
 import { Overzicht } from "./overzicht.jsx";
 import { Vermogen } from "./vermogen.jsx";
@@ -19,13 +20,14 @@ import { YearSwitcher, NewYearDialog, DataBackup, Activiteit, ChangePasswordCard
 // opslaan met revisiecontrole (409-conflict), polling en navigatie tussen tabbladen.
 // App() eronder doet het opstarten: inloggen -> wachtwoord -> laden -> werkruimte.
 
-function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, saveError = false, onTakeServer, onKeepMine, onRestore }) {
+function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, conflict, saveError = false, onTakeServer, onKeepMine, onRestore }) {
   const { groups, categories, years, activeYearId, budgets, pots, rules, transactions } = state;
   const openingBalanceCents = state.openingBalanceCents ?? null;
   const reviewedBatches = state.reviewedBatches || [];
   const markBatchReviewed = (id) => { setState((s) => ({ ...s, reviewedBatches: (s.reviewedBatches || []).includes(id) ? s.reviewedBatches : [...(s.reviewedBatches || []), id] })); };
   const [tab, setTab] = useState("overzicht");
   const [showChangePw, setShowChangePw] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
   const [showNewYear, setShowNewYear] = useState(false);
   const isMobile = useIsMobile();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -212,20 +214,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
     for (let m = 1; m <= currentMonth; m++) { if (monthsWithData.has(m)) reconciledThrough = m; else break; }
     const reconciliation = { through: saldoGaps === 0 ? reconciledThrough : 0, gaps: saldoGaps, currentMonth };
 
-    // ---- Voorschot-ouderdom (tikkies die te lang openstaan) ----
-    const today = new Date();
-    const agingAdvances = [];
-    for (const t of transactions) {
-      if (!t.advance) continue;
-      const remaining = remainingOf(t, transactions);
-      if (remaining <= 0) continue;
-      const d = new Date(effDate(t));
-      const days = isNaN(d) ? 0 : Math.floor((today - d) / 86400000);
-      agingAdvances.push({ id: t.id, name: t.name || "voorschot", date: effDate(t), remaining, days });
-    }
-    agingAdvances.sort((a, b) => b.days - a.days);
-
-    return { monthly, topPostsByMonth, vitals, currentMonth, existingHashes, accountBalance, forecast, forecastYear, reconciliation, agingAdvances, bankBalanceCents, saldoGaps, chainOpening, freqAlerts, topDeviations, missingRecurring, recurringTotal, recurringPaid, savingsRate, vastMonthly, varMonthly };
+    return { monthly, topPostsByMonth, vitals, currentMonth, existingHashes, accountBalance, forecast, forecastYear, reconciliation, bankBalanceCents, saldoGaps, chainOpening, freqAlerts, topDeviations, missingRecurring, recurringTotal, recurringPaid, savingsRate, vastMonthly, varMonthly };
   }, [budgets, year, categories, transactions, pots, catById, openingBalanceCents]);
 
   const prevYear = years.find((y) => y.jaartal === year.jaartal - 1) || null;
@@ -394,105 +383,28 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
     setState((s) => ({ ...s, transactions: [...s.transactions, tx] }));
     logAction("losse transactie toegevoegd");
   };
-  const linkSettlement = (incomingId, advanceId, amountCents) => {
-    if (!(amountCents > 0)) return;
-    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
-      if (t.id !== incomingId) return t;
-      const settlements = [...settlementsOf(t).filter((x) => x.advanceId !== advanceId), { advanceId, amountCents }];
-      return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
-    }) }));
-    logAction("tikkie (deels) verrekend");
+  // ---- Bundels (tikkies) — nieuw model ----
+  // Een bundel is een zelfstandig object: naam, txIds, verdeelmodus, personen (met bedrag +
+  // betaald), en een afgehandeld-vlag. Geen settlements op transacties meer.
+  const maakBundel = (naam, txIds) => {
+    const b = { id: uid(), naam: String(naam || "").trim() || "Bundel", txIds: [...(txIds || [])], verdeelModus: "personen", ikDoeMee: true, personen: [], afgehandeld: false };
+    setState((s) => ({ ...s, bundles: [...(s.bundles || []), b] }));
+    logAction("bundel aangemaakt: " + b.naam);
   };
-  const unlinkSettlement = (incomingId, advanceId) => {
-    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
-      if (t.id !== incomingId) return t;
-      const settlements = settlementsOf(t).filter((x) => x.advanceId !== advanceId);
-      return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
-    }) }));
-    logAction("koppeling tikkie ongedaan gemaakt");
+  const wijzigBundel = (bundle) => {
+    setState((s) => ({ ...s, bundles: (s.bundles || []).map((b) => (b.id === bundle.id ? bundle : b)) }));
   };
-  const unsettleTx = (txId) => {
-    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
-      if (t.id === txId) return { ...t, settledWith: undefined, settlements: [], allocations: [] };
-      if (t.settledWith === txId || settlementsOf(t).some((x) => x.advanceId === txId)) { const settlements = settlementsOf(t).filter((x) => x.advanceId !== txId); return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) }; }
-      return t;
-    }) }));
-    logAction("verrekening ongedaan gemaakt");
-  };
-  // ---- Gedeelde bundels (tikkie) ----
-  // Een bundel bestaat zodra transacties het label dragen; hier hangen we er personen aan.
-  const bundelDef = (s, key) => (s.bundles || []).find((b) => b.key === key);
-  // Groepsgrootte zetten via de deelknop. n = totaal aantal personen INCLUSIEF jou,
-  // dus de personenlijst (de anderen) wordt n-1 lang. Krimpen gooit de laatste namen weg
-  // en ruimt hun betalingskoppelingen op, anders blijft er geld aan een spook hangen.
-  const setBundleSize = (key, n) => {
-    const k = String(key || "").trim().toLowerCase();
-    const anderen = Math.max(0, Math.min(50, Math.round(n) - 1));
-    if (!k) return;
-    setState((s) => {
-      const bestaand = (s.bundles || []).find((b) => b.key === k);
-      const huidig = (bestaand && bestaand.people) || [];
-      let people = huidig.slice(0, anderen);
-      for (let i = people.length; i < anderen; i++) people.push({ id: "bp" + Math.random().toString(36).slice(2, 8), naam: `Persoon ${i + 1}` });
-      const weg = huidig.slice(anderen).map((p) => p.id);
-      const label = (s.transactions.find((t) => ((t.bundle || "").trim().toLowerCase()) === k) || {}).bundle || k;
-      const bundles = bestaand
-        ? (s.bundles || []).map((b) => (b.key === k ? { ...b, people } : b))
-        : [...(s.bundles || []), { key: k, naam: String(label).trim(), people }];
-      const transactions = weg.length === 0 ? s.transactions : s.transactions.map((t) => {
-        const sm = settlementsOf(t);
-        if (!sm.some((x) => x.bundleKey === k && weg.includes(x.personId))) return t;
-        const settlements = sm.filter((x) => !(x.bundleKey === k && weg.includes(x.personId)));
-        return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
-      });
-      return { ...s, bundles, transactions };
-    });
-    logAction("bundel gedeeld door " + Math.round(n));
-  };
-  const renameBundlePerson = (key, personId, naam) => {
-    const k = String(key || "").trim().toLowerCase();
-    setState((s) => ({ ...s, bundles: (s.bundles || []).map((b) => (b.key === k ? { ...b, people: (b.people || []).map((p) => (p.id === personId ? { ...p, naam } : p)) } : b)) }));
-  };
-  // Betaling van één persoon koppelen aan een bundel.
-  const linkBundlePayment = (incomingId, key, personId, amountCents) => {
-    if (!(amountCents > 0)) return;
-    const k = String(key || "").trim().toLowerCase();
-    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
-      if (t.id !== incomingId) return t;
-      const settlements = [...settlementsOf(t).filter((x) => !(x.bundleKey === k && x.personId === personId)), { bundleKey: k, personId, amountCents }];
-      return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
-    }) }));
-    logAction("bundelbetaling gekoppeld");
-  };
-  const unlinkBundlePayment = (incomingId, key, personId) => {
-    const k = String(key || "").trim().toLowerCase();
-    setState((s) => ({ ...s, transactions: s.transactions.map((t) => {
-      if (t.id !== incomingId) return t;
-      const settlements = settlementsOf(t).filter((x) => !(x.bundleKey === k && x.personId === personId));
-      return { ...t, settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) };
-    }) }));
-    logAction("bundelbetaling ontkoppeld");
-  };
-  // Bundel verwijderen = alleen het label weghalen. De transacties zelf blijven staan.
-  const removeBundle = (key) => {
-    const k = String(key || "").trim().toLowerCase();
-    setState((s) => ({
-      ...s,
-      bundles: (s.bundles || []).filter((b) => b.key !== k),
-      transactions: s.transactions.map((t) => {
-        const heeftLabel = ((t.bundle || "").trim().toLowerCase()) === k;
-        const sm = settlementsOf(t);
-        const raakt = sm.some((x) => x.bundleKey === k);
-        if (!heeftLabel && !raakt) return t;
-        const settlements = sm.filter((x) => x.bundleKey !== k);
-        return {
-          ...t,
-          ...(heeftLabel ? { bundle: "" } : {}),
-          ...(raakt ? { settledWith: undefined, settlements, allocations: allocsFromSettlements(settlements, s.transactions) } : {}),
-        };
-      }),
-    }));
+  const verwijderBundel = (id) => {
+    setState((s) => ({ ...s, bundles: (s.bundles || []).filter((b) => b.id !== id) }));
     logAction("bundel verwijderd");
+  };
+  const afhandelenBundel = (id) => {
+    setState((s) => ({ ...s, bundles: (s.bundles || []).map((b) => (b.id === id ? { ...b, afgehandeld: true } : b)) }));
+    logAction("bundel afgehandeld");
+  };
+  const heropenBundel = (id) => {
+    setState((s) => ({ ...s, bundles: (s.bundles || []).map((b) => (b.id === id ? { ...b, afgehandeld: false } : b)) }));
+    logAction("bundel heropend");
   };
 
   const [reviewKick, setReviewKick] = useState(0);
@@ -610,6 +522,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
           <div style={footerStyle}>
             <div style={{ fontSize: 12, color: T.ink, fontWeight: 600, marginBottom: 8 }}>Ingelogd als {user.displayName}</div>
             <button onClick={() => setShowChangePw(true)} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Wachtwoord wijzigen</button>
+            {isAdmin && <button onClick={() => setShowAdmin(true)} style={{ width: "100%", border: `1px solid ${T.accent}`, background: T.panel, color: T.accent, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Huishoudens beheren</button>}
             <button onClick={onLogout} style={{ width: "100%", border: `1px solid ${T.line}`, background: T.panel, color: T.sub, cursor: "pointer", padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600 }}>Uitloggen</button>
             <div style={{ fontSize: 11, color: T.sub, marginTop: 10, display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: dbReady ? T.pos : T.warn }} />
@@ -656,10 +569,10 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
               </div>
             )}
             {tab === "mhome" && <MobileHome bankNow={bankNow} teSorteren={teSorterenBadge} transactions={transactions.filter((t) => effYear(t) === year.jaartal)} tasks={tasks} onStartReview={startReview} onToggleTask={toggleTask} onRemoveTask={removeTask} onOpenTx={(txId) => gotoTransacties({ txId })} />}
-            {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthly={derived.monthly} topPostsByMonth={derived.topPostsByMonth} teSorteren={teSorterenBadge} onDrill={gotoTransacties} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} forecastYear={derived.forecastYear} reconciliation={derived.reconciliation} agingAdvances={derived.agingAdvances} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
+            {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthly={derived.monthly} topPostsByMonth={derived.topPostsByMonth} teSorteren={teSorterenBadge} onDrill={gotoTransacties} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} forecastYear={derived.forecastYear} reconciliation={derived.reconciliation} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
             {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
             {tab === "transacties" && <Transacties onOpenTikkies={() => setTab("tikkies")} onClearBatch={clearBatch} groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} preset={txPreset} onPresetConsumed={() => setTxPreset(null)} />}
-            {tab === "tikkies" && <TikkiesEnDelen transactions={transactions} categories={categories} bundles={state.bundles || []} onLinkSettle={linkSettlement} onUnlinkSettle={unlinkSettlement} onUnsettle={unsettleTx} onPatch={patchTx} onSetBundleSize={setBundleSize} onRenameBundlePerson={renameBundlePerson} onRemoveBundle={removeBundle} onLinkBundlePayment={linkBundlePayment} onUnlinkBundlePayment={unlinkBundlePayment} />}
+            {tab === "tikkies" && <TikkiesEnDelen transactions={transactions} bundles={state.bundles || []} onMaakBundel={maakBundel} onWijzigBundel={wijzigBundel} onVerwijderBundel={verwijderBundel} onAfhandelen={afhandelenBundel} onHeropen={heropenBundel} />}
             {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
             {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} year={year} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
             {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
@@ -676,6 +589,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
             </div>
           </div>
         )}
+        {showAdmin && <HuishoudBeheer onClose={() => setShowAdmin(false)} />}
         {showNewYear && <NewYearDialog years={years} budgets={budgets} categories={categories} transactions={transactions} onCreate={createYear} onClose={() => setShowNewYear(false)} />}
       </div>
     </HuishoudProvider>
@@ -686,6 +600,7 @@ function Workspace({ state, setState, dbReady, user, meta, onLogout, conflict, s
 export default function App() {
   const [phase, setPhase] = useState("loading"); // loading | login | change | ready
   const [user, setUser] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [state, setState] = useState(null);
   const [dbReady, setDbReady] = useState(false);
   const [meta, setMeta] = useState(null);
@@ -723,7 +638,7 @@ export default function App() {
       try {
         const m = await me();
         setDbReady(!!m.db);
-        if (m.authed) { setUser(m.user); if (m.mustChange) setPhase("change"); else await load(); }
+        if (m.authed) { setUser(m.user); setIsAdmin(!!m.isAdmin); if (m.mustChange) setPhase("change"); else await load(); }
         else setPhase("login");
       } catch { setPhase("login"); }
     })();
@@ -783,6 +698,6 @@ export default function App() {
     return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, color: T.sub, fontFamily: T.sans, fontSize: 14 }}>Bezig met laden…</div>;
   if (phase === "login") return <LoginScreen onSuccess={onLoginSuccess} />;
   if (phase === "change" && user) return <ChangePasswordScreen user={user} onDone={onChangeDone} />;
-  if (phase === "ready" && state && user) return <ErrorBoundary><Workspace state={state} setState={setState} dbReady={dbReady} user={user} meta={meta} onLogout={onLogout} conflict={conflict} saveError={saveError} onTakeServer={resolveConflictTakeServer} onKeepMine={resolveConflictKeepMine} onRestore={restoreState} /></ErrorBoundary>;
+  if (phase === "ready" && state && user) return <ErrorBoundary><Workspace state={state} setState={setState} dbReady={dbReady} user={user} isAdmin={isAdmin} meta={meta} onLogout={onLogout} conflict={conflict} saveError={saveError} onTakeServer={resolveConflictTakeServer} onKeepMine={resolveConflictKeepMine} onRestore={restoreState} /></ErrorBoundary>;
   return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: T.bg, color: T.sub, fontFamily: T.sans, fontSize: 14 }}>Bezig met laden…</div>;
 }
