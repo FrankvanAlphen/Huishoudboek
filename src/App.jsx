@@ -504,6 +504,9 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
     ["activiteit", "Activiteit", <><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 14" /></>],
   ];
   const teSorterenBadge = transactions.reduce((n, t) => n + (effYear(t) === year.jaartal && (!t.allocations || t.allocations.length === 0) ? 1 : 0), 0);
+  // Aantal open bundels (nog niet afgehandeld) — badge op het Tikkies-tabblad, zodat je ziet dat er
+  // nog tikkies afgerond moeten worden zonder het tabblad te openen.
+  const openBundelsBadge = (state.bundles || []).reduce((n, b) => n + (b.afgehandeld ? 0 : 1), 0);
 
   const asideStyle = isMobile
     ? { width: 240, background: T.panel, borderRight: `1px solid ${T.line}`, padding: "20px 14px", position: "fixed", top: 0, left: 0, height: "100vh", boxSizing: "border-box", zIndex: 41, transform: menuOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease", boxShadow: menuOpen ? "2px 0 16px rgba(0,0,0,0.15)" : "none" }
@@ -531,6 +534,7 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
               <span style={{ color: tab === id ? T.accent : "#9aa8a5", display: "flex" }}><Icon d={icon} /></span>
               <span style={{ flex: 1 }}>{label}</span>
               {id === "transacties" && teSorterenBadge > 0 && <span style={{ fontSize: 11, fontWeight: 700, minWidth: 18, textAlign: "center", padding: "1px 6px", borderRadius: 999, background: T.warn, color: "#fff" }}>{teSorterenBadge}</span>}
+              {id === "tikkies" && openBundelsBadge > 0 && <span style={{ fontSize: 11, fontWeight: 700, minWidth: 18, textAlign: "center", padding: "1px 6px", borderRadius: 999, background: T.warn, color: "#fff" }}>{openBundelsBadge}</span>}
             </button>
           ))}
           {tasks.filter((t) => !t.done && t.to === user.username).length > 0 && (

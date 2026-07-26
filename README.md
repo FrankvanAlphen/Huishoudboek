@@ -107,7 +107,9 @@ hooguit één bundel; kies je een andere, dan verhuist hij.
 **Afhandelen.** Per persoon vink je *betaald* aan zodra ze getikt hebben. Zodra iedereen is
 afgevinkt, wordt de knop *Afhandelen* actief en verhuist de bundel naar *Afgehandelde tikkies*.
 Vergist? Met *Heropenen* (achter een bevestiging) zet je hem terug op open. De transacties in een
-bundel kun je altijd zien en aanpassen (in-/uitklappen, eruit halen).
+bundel kun je altijd zien en aanpassen (in-/uitklappen, eruit halen). In de zijbalk staat naast
+*Tikkies & delen* een telbadge met het aantal nog niet-afgehandelde bundels, zodat je ziet dat er
+nog tikkies afgerond moeten worden zonder het tabblad te openen.
 
 **Vanuit het transactie-scherm.** Bij het toekennen van een transactie (in de rij én in het
 import-doorloopscherm) kun je twee dingen doen: de uitgave direct aan een bundel koppelen — een
