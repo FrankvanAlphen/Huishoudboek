@@ -176,14 +176,67 @@ function AfgehandeldeKaart({ bundle, transactions, onHeropen }) {
 }
 
 // ---------------------------------------------------------------------------
+// Lijst van transacties die je hebt gemarkeerd als "nog te verrekenen" (via een tikkie),
+// maar die je nog niet in een bundel hebt gestopt. Hiermee maak je in één klik een bundel.
+// De markering blijft staan tot je 'm zelf weghaalt — ook als de transactie al gebundeld is.
+// ---------------------------------------------------------------------------
+function TeVerrekenenLijst({ transactions, bestaandeTxIds, bundelVanTx, onMaakBundel, onSetTeVerrekenen }) {
+  const items = useMemo(
+    () => (transactions || []).filter((t) => t.teVerrekenen && t.amountCents < 0).sort((a, b) => (a.date < b.date ? 1 : -1)),
+    [transactions]
+  );
+  if (items.length === 0) return null;
+
+  // alleen de nog-niet-gebundelde tellen mee voor "bundel maken van deze"
+  const nogVrij = items.filter((t) => !bestaandeTxIds.has(t.id));
+  const totaalVrij = nogVrij.reduce((s, t) => s + Math.abs(t.amountCents), 0);
+
+  return (
+    <Card style={{ padding: 16, marginBottom: 12, border: `1px solid ${T.accent}` }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <div style={{ fontSize: 14, fontWeight: 800 }}>Nog te verrekenen</div>
+        {nogVrij.length > 0 && (
+          <Btn size="sm" onClick={() => onMaakBundel("Te verrekenen", nogVrij.map((t) => t.id))} title="Maak een bundel van de nog niet-gebundelde transacties">
+            Bundel maken van deze ({nogVrij.length})
+          </Btn>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: T.sub, marginBottom: 10 }}>
+        Transacties die je apart hebt gemarkeerd om via een tikkie te verrekenen.{nogVrij.length > 0 && <> Nog niet gebundeld: {money(totaalVrij)}.</>}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {items.map((t) => {
+          const b = bundelVanTx(t.id);
+          return (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 9px", border: `1px solid ${T.line}`, borderRadius: 7, fontSize: 12.5, background: b ? "#f7f7f9" : "transparent" }}>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || "—"}</span>
+              {b && <span style={{ fontSize: 11, color: T.sub, background: T.panel, border: `1px solid ${T.line}`, borderRadius: 999, padding: "1px 8px" }}>in bundel: {b.naam}</span>}
+              <span style={{ color: T.sub, fontSize: 11.5 }}>{t.date}</span>
+              <span style={{ fontFamily: T.mono }}>{formatEUR(Math.abs(t.amountCents))}</span>
+              <button onClick={() => onSetTeVerrekenen(t.id, false)} title="Markering weghalen" style={{ background: "none", border: "none", color: T.neg, cursor: "pointer", fontSize: 15 }}>×</button>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Het tabblad zelf.
 // ---------------------------------------------------------------------------
-function TikkiesEnDelen({ transactions, bundles = [], onMaakBundel, onWijzigBundel, onVerwijderBundel, onAfhandelen, onHeropen }) {
+function TikkiesEnDelen({ transactions, bundles = [], onMaakBundel, onWijzigBundel, onVerwijderBundel, onAfhandelen, onHeropen, onSetTeVerrekenen }) {
   const [maakNieuw, setMaakNieuw] = useState(false);
   const bestaandeTxIds = useMemo(() => {
     const s = new Set();
     for (const b of bundles) for (const id of (b.txIds || [])) s.add(id);
     return s;
+  }, [bundles]);
+  // welke bundel bevat een gegeven transactie (voor het "in bundel: …"-label)
+  const bundelVanTx = useMemo(() => {
+    const m = new Map();
+    for (const b of bundles) for (const id of (b.txIds || [])) m.set(id, b);
+    return (txId) => m.get(txId) || null;
   }, [bundles]);
 
   const open = bundles.filter((b) => !b.afgehandeld);
@@ -196,6 +249,16 @@ function TikkiesEnDelen({ transactions, bundles = [], onMaakBundel, onWijzigBund
         {!maakNieuw && <Btn size="sm" onClick={() => setMaakNieuw(true)}>+ Nieuwe bundel</Btn>}
       </div>
       <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 6 }}>Bundel je uitgaven, verdeel het bedrag en vink af wie betaald heeft. Is iedereen rond, dan handel je de bundel af.</div>
+
+      {onSetTeVerrekenen && (
+        <TeVerrekenenLijst
+          transactions={transactions}
+          bestaandeTxIds={bestaandeTxIds}
+          bundelVanTx={bundelVanTx}
+          onMaakBundel={onMaakBundel}
+          onSetTeVerrekenen={onSetTeVerrekenen}
+        />
+      )}
 
       {maakNieuw && (
         <NieuweBundel

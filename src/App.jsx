@@ -406,6 +406,29 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
     setState((s) => ({ ...s, bundles: (s.bundles || []).map((b) => (b.id === id ? { ...b, afgehandeld: false } : b)) }));
     logAction("bundel heropend");
   };
+  // Koppelt een transactie aan een bundel vanuit het transactie-scherm. keuze is een bundle-id,
+  // { nieuw: naam } voor een nieuwe bundel, of null om te ontkoppelen. Eén transactie hoort bij
+  // hooguit één bundel: we halen de txId eerst overal weg en voegen 'm dan aan de doelbundel toe.
+  const setTxBundle = (txId, keuze) => {
+    setState((s) => {
+      // eerst txId uit elke bestaande bundel verwijderen
+      let bundles = (s.bundles || []).map((b) => ((b.txIds || []).includes(txId) ? { ...b, txIds: b.txIds.filter((x) => x !== txId) } : b));
+      if (keuze && keuze.nieuw) {
+        bundles = [...bundles, { id: uid(), naam: String(keuze.nieuw).trim() || "Bundel", txIds: [txId], verdeelModus: "personen", ikDoeMee: true, personen: [], afgehandeld: false }];
+      } else if (keuze) {
+        bundles = bundles.map((b) => (b.id === keuze ? { ...b, txIds: [...(b.txIds || []), txId] } : b));
+      }
+      return { ...s, bundles };
+    });
+    logAction(keuze ? (keuze.nieuw ? "transactie aan nieuwe bundel gekoppeld" : "transactie aan bundel gekoppeld") : "transactie uit bundel gehaald");
+  };
+  // Markering "nog te verrekenen via een tikkie" op een transactie zetten of weghalen. Los van
+  // bundels: het is een wachtlijstje dat je later zelf bundelt. De markering blijft staan tot je
+  // 'm hier of in het transactie-scherm weghaalt, ook als de transactie al in een bundel zit.
+  const setTeVerrekenen = (txId, aan) => {
+    patchTx(txId, { teVerrekenen: !!aan });
+    logAction(aan ? "transactie gemarkeerd als te verrekenen" : "markering te verrekenen weggehaald");
+  };
 
   const [reviewKick, setReviewKick] = useState(0);
   const startReview = () => { setTab("transacties"); setReviewKick((k) => k + 1); };
@@ -571,8 +594,8 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
             {tab === "mhome" && <MobileHome bankNow={bankNow} teSorteren={teSorterenBadge} transactions={transactions.filter((t) => effYear(t) === year.jaartal)} tasks={tasks} onStartReview={startReview} onToggleTask={toggleTask} onRemoveTask={removeTask} onOpenTx={(txId) => gotoTransacties({ txId })} />}
             {tab === "overzicht" && <Overzicht vitals={derived.vitals} monthly={derived.monthly} topPostsByMonth={derived.topPostsByMonth} teSorteren={teSorterenBadge} onDrill={gotoTransacties} currentMonth={derived.currentMonth} jaar={year.jaartal} openActions={openActions} forecast={derived.forecast} forecastYear={derived.forecastYear} reconciliation={derived.reconciliation} openingBalanceCents={openingBalanceCents} bankBalanceCents={derived.bankBalanceCents} saldoGaps={derived.saldoGaps} chainOpening={derived.chainOpening} freqAlerts={derived.freqAlerts} topDeviations={derived.topDeviations} missingRecurring={derived.missingRecurring} recurringTotal={derived.recurringTotal} recurringPaid={derived.recurringPaid} savingsRate={derived.savingsRate} vastMonthly={derived.vastMonthly} varMonthly={derived.varMonthly} onSetOpeningBalance={setOpeningBalance} onGoto={setTab} onReview={startReview} />}
             {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
-            {tab === "transacties" && <Transacties onOpenTikkies={() => setTab("tikkies")} onClearBatch={clearBatch} groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} preset={txPreset} onPresetConsumed={() => setTxPreset(null)} />}
-            {tab === "tikkies" && <TikkiesEnDelen transactions={transactions} bundles={state.bundles || []} onMaakBundel={maakBundel} onWijzigBundel={wijzigBundel} onVerwijderBundel={verwijderBundel} onAfhandelen={afhandelenBundel} onHeropen={heropenBundel} />}
+            {tab === "transacties" && <Transacties onOpenTikkies={() => setTab("tikkies")} bundles={state.bundles || []} onSetBundle={setTxBundle} onClearBatch={clearBatch} groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} preset={txPreset} onPresetConsumed={() => setTxPreset(null)} />}
+            {tab === "tikkies" && <TikkiesEnDelen transactions={transactions} bundles={state.bundles || []} onMaakBundel={maakBundel} onWijzigBundel={wijzigBundel} onVerwijderBundel={verwijderBundel} onAfhandelen={afhandelenBundel} onHeropen={heropenBundel} onSetTeVerrekenen={setTeVerrekenen} />}
             {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
             {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} year={year} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
             {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}

@@ -1,8 +1,8 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { formatEUR, MND_KORT, batchesOf, effYear, effMonth, batchColor, fmtDateTime } from "./lib.js";
 import { guessKeyword, unknownSavingsCodes, ruleMatches, rankSuggestions } from "./financieel.js";
-import { T, Btn, Card, inputStyle, MaandKiezer, Chip, MoneyInput, SectionTitle, Badge, PeriodControl} from "./ui.jsx";
-import { TX_COLS, TxRow, PostPicker, VermogenHint, SplitEditor, RuleLearn } from "./txrow.jsx";
+import { T, Btn, Card, inputStyle, MaandKiezer, Chip, MoneyInput, SectionTitle, Badge, PeriodControl, Toggle} from "./ui.jsx";
+import { TX_COLS, TxRow, PostPicker, VermogenHint, SplitEditor, RuleLearn, BundelKiezer } from "./txrow.jsx";
 import { useHuishoudboekje } from "./store.jsx";
 
 // ---- Transacties-tabblad ----
@@ -151,7 +151,7 @@ function OnbekendeSpaarrekeningen({ transactions, categories, onCreateSavings, o
   );
 }
 
-function Transacties({ groups, categories, year, years = [], transactions, rules = [], onOpenTikkies, onClearBatch, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview, preset = null, onPresetConsumed }) {
+function Transacties({ groups, categories, year, years = [], transactions, rules = [], bundles = [], onSetBundle, onOpenTikkies, onClearBatch, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onClearYear, onClearRange, onClearAll, onResetAll, onAddManual, onLinkSettle, onUnlinkSettle, onUnsettle, onCreateSavings, onLinkSavings, reviewedBatches = [], onMarkBatchReviewed, kickReview, preset = null, onPresetConsumed }) {
   const { isMobile } = useHuishoudboekje();
   const [showCleanup, setShowCleanup] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -210,7 +210,7 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
       {showCleanup && <div style={{ marginTop: 12 }}><DataCleanup year={year} years={years} txCount={transactions.length} transactions={transactions} onClearBatch={onClearBatch} onClearRange={onClearRange} onClearYear={onClearYear} onClearAll={onClearAll} onResetAll={onResetAll} /></div>}
       {reviewing ? (
         <div style={{ marginTop: 12 }}>
-          <ImportReview items={teSorterenItems} groups={groups} categories={categories} rules={rules} history={transactions} transactions={transactions} years={years} title={`Transacties ${year.jaartal} nalopen`} onSaveOne={onSaveOne} onAddRule={onAddRule} onClose={() => setReviewing(false)} onOpenTikkies={onOpenTikkies} />
+          <ImportReview items={teSorterenItems} groups={groups} categories={categories} rules={rules} history={transactions} transactions={transactions} years={years} bundles={bundles} onSetBundle={onSetBundle} title={`Transacties ${year.jaartal} nalopen`} onSaveOne={onSaveOne} onAddRule={onAddRule} onClose={() => setReviewing(false)} onOpenTikkies={onOpenTikkies} />
         </div>
       ) : (
       <>
@@ -260,7 +260,7 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
           <div style={{ display: isMobile ? "none" : "grid", gridTemplateColumns: TX_COLS, gap: 10, padding: "9px 14px", background: "#eef3f1", fontSize: 11, fontWeight: 700, color: T.sub }}>
             <span>Datum</span><span>Omschrijving</span><span style={{ textAlign: "right" }}>Bedrag</span><span>Post</span><span style={{ textAlign: "center" }}>Mark</span><span />
           </div>
-          {visible.map((t) => <TxRow key={t.id} tx={t} groups={groups} categories={categories} rules={rules} history={transactions} years={years} newBatchId={newestUnreviewed ? newestUnreviewed.id : null} onSetAllocations={onSetAllocations} onSetNote={onSetNote} onToggleFlag={onToggleFlag} onAddRule={onAddRule} onSaveOne={onSaveOne} />)}
+          {visible.map((t) => <TxRow key={t.id} tx={t} groups={groups} categories={categories} rules={rules} history={transactions} years={years} newBatchId={newestUnreviewed ? newestUnreviewed.id : null} bundles={bundles} onSetBundle={onSetBundle} onSetAllocations={onSetAllocations} onSetNote={onSetNote} onToggleFlag={onToggleFlag} onAddRule={onAddRule} onSaveOne={onSaveOne} />)}
           {shown.length === 0 && <div style={{ padding: 16, fontSize: 13, color: T.sub }}>Geen transacties met dit filter.</div>}
           {shown.length > visible.length && (
             <div style={{ padding: "12px 14px", borderTop: `1px solid ${T.line}`, display: "flex", justifyContent: "center", gap: 12, alignItems: "center" }}>
@@ -277,7 +277,7 @@ function Transacties({ groups, categories, year, years = [], transactions, rules
   );
 }
 
-function ImportReview({ items, groups, categories, rules = [], history = [], transactions = [], years = [], title = "Transacties nalopen", onSaveOne, onAddRule, onClose, onOpenTikkies }) {
+function ImportReview({ items, groups, categories, rules = [], history = [], transactions = [], years = [], bundles = [], onSetBundle, title = "Transacties nalopen", onSaveOne, onAddRule, onClose, onOpenTikkies }) {
   const [work, setWork] = useState(() => items.map((t) => ({ ...t })));
   const [i, setI] = useState(0);
   const [splitting, setSplitting] = useState(false);
@@ -358,6 +358,13 @@ function ImportReview({ items, groups, categories, rules = [], history = [], tra
           Markeer als "nog uitzoeken"
         </label>
         <div style={{ marginBottom: 14 }}><PeriodControl tx={cur} years={years} onChange={(pd) => update({ periodDate: pd })} /></div>
+        {sign < 0 && (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 14, cursor: "pointer" }}>
+            <Toggle on={!!cur.teVerrekenen} onClick={() => update({ teVerrekenen: !cur.teVerrekenen })} />
+            <span>Nog te verrekenen via een tikkie</span>
+          </label>
+        )}
+        {onSetBundle && sign < 0 && <div style={{ marginBottom: 14 }}><BundelKiezer tx={cur} bundles={bundles} onSetBundle={onSetBundle} /></div>}
 
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Waar hoort dit bij?</div>
         {isSplit

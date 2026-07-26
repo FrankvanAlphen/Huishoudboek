@@ -273,7 +273,36 @@ function TaakKnop({ tx }) {
     </span>
   );
 }
-function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [], newBatchId = null, onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne }) {
+// Koppelt een transactie aan een bundel (voor delen/tikkies). Eén transactie hoort bij hooguit
+// één bundel. Je kiest een bestaande bundel, maakt een nieuwe, of ontkoppelt. De koppeling zelf
+// leeft in bundle.txIds; deze component vertaalt dat naar een simpele keuze.
+function BundelKiezer({ tx, bundles = [], onSetBundle }) {
+  const [nieuw, setNieuw] = useState(false);
+  const [naam, setNaam] = useState("");
+  const huidige = bundles.find((b) => (b.txIds || []).includes(tx.id));
+
+  if (nieuw) {
+    return (
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: T.sub, width: 64 }}>Bundel</span>
+        <input autoFocus value={naam} onChange={(e) => setNaam(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && naam.trim()) { onSetBundle(tx.id, { nieuw: naam.trim() }); setNieuw(false); setNaam(""); } if (e.key === "Escape") { setNieuw(false); setNaam(""); } }} placeholder="Naam nieuwe bundel" style={{ ...inputStyle, fontSize: 13, padding: "6px 10px", flex: 1 }} />
+        <Btn size="sm" disabled={!naam.trim()} onClick={() => { onSetBundle(tx.id, { nieuw: naam.trim() }); setNieuw(false); setNaam(""); }}>Maak</Btn>
+        <Btn size="sm" variant="ghost" onClick={() => { setNieuw(false); setNaam(""); }}>×</Btn>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <span style={{ fontSize: 12, color: T.sub, width: 64 }}>Bundel</span>
+      <select value={huidige ? huidige.id : ""} onChange={(e) => { const v = e.target.value; if (v === "__nieuw") setNieuw(true); else onSetBundle(tx.id, v || null); }} style={{ ...inputStyle, fontSize: 13, padding: "6px 10px", flex: 1 }}>
+        <option value="">— geen bundel —</option>
+        {bundles.filter((b) => !b.afgehandeld).map((b) => <option key={b.id} value={b.id}>{b.naam}</option>)}
+        <option value="__nieuw">+ Nieuwe bundel…</option>
+      </select>
+    </div>
+  );
+}
+function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [], newBatchId = null, bundles = [], onSetAllocations, onSetNote, onToggleFlag, onAddRule, onSaveOne, onSetBundle }) {
   const { attachCounts, isMobile } = useHuishoudboekje();
   const [showAttach, setShowAttach] = useState(false);
   const [open, setOpen] = useState(false);
@@ -356,6 +385,13 @@ function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [
             <input value={tx.note || ""} onChange={(e) => onSetNote(tx.id, e.target.value)} placeholder="bijv. voorgeschoten voor Maud" style={{ ...inputStyle, fontSize: 13, padding: "6px 10px" }} />
           </div>
           {onSaveOne && <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ fontSize: 12, color: T.sub, width: 64 }}>Periode</span><PeriodControl tx={tx} years={years} onChange={(pd) => onSaveOne(tx.id, { periodDate: pd })} /></div>}
+          {onSaveOne && sign < 0 && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+              <Toggle on={!!tx.teVerrekenen} onClick={() => onSaveOne(tx.id, { teVerrekenen: !tx.teVerrekenen })} />
+              <span style={{ color: T.sub }}>Nog te verrekenen via een tikkie</span>
+            </label>
+          )}
+          {onSetBundle && sign < 0 && <BundelKiezer tx={tx} bundles={bundles} onSetBundle={onSetBundle} />}
           {!splitting && (
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
               <Btn variant="secondary" size="sm" onClick={() => setSplitting(true)}>Verdeel over meerdere posten</Btn>
@@ -371,7 +407,7 @@ function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [
 // Alleen opnieuw renderen als de transactie zelf of relevante lijsten wijzigen — scheelt veel werk
 // bij lange transactielijsten.
 const TxRow = React.memo(TxRowBase, (a, b) =>
-  a.tx === b.tx && a.categories === b.categories && a.rules === b.rules && a.years === b.years && a.newBatchId === b.newBatchId && a.groups === b.groups && a.history === b.history
+  a.tx === b.tx && a.categories === b.categories && a.rules === b.rules && a.years === b.years && a.newBatchId === b.newBatchId && a.groups === b.groups && a.history === b.history && a.bundles === b.bundles
 );
 
-export { VermogenHint, PostPicker, SplitEditor, fileToUploadPayload, Bijlagen, TaakKnop, TxRowBase, TxRow, TX_COLS, RuleLearn };
+export { VermogenHint, PostPicker, SplitEditor, fileToUploadPayload, Bijlagen, TaakKnop, TxRowBase, TxRow, TX_COLS, RuleLearn, BundelKiezer };

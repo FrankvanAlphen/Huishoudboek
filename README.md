@@ -99,10 +99,24 @@ en vinkt de bestaande transacties aan die erbij horen. De bundel toont het totaa
   Klopt de som niet met het totaal, dan toont de app het verschil (onverdeeld of te veel) — je beslist
   zelf, er wordt niet automatisch herverdeeld.
 
+**Koppelen vanuit een transactie.** Behalve op het Tikkies-tabblad kun je een uitgave ook aan een
+bundel hangen terwijl je 'm toekent — zowel in de open transactierij als in het import-doorloopscherm.
+Onder "Bundel" kies je een bestaande bundel of maak je er direct een nieuwe. Een transactie hoort bij
+hooguit één bundel; kies je een andere, dan verhuist hij.
+
 **Afhandelen.** Per persoon vink je *betaald* aan zodra ze getikt hebben. Zodra iedereen is
 afgevinkt, wordt de knop *Afhandelen* actief en verhuist de bundel naar *Afgehandelde tikkies*.
 Vergist? Met *Heropenen* (achter een bevestiging) zet je hem terug op open. De transacties in een
 bundel kun je altijd zien en aanpassen (in-/uitklappen, eruit halen).
+
+**Vanuit het transactie-scherm.** Bij het toekennen van een transactie (in de rij én in het
+import-doorloopscherm) kun je twee dingen doen: de uitgave direct aan een bundel koppelen — een
+bestaande kiezen of ter plekke een nieuwe maken (één transactie hoort bij hooguit één bundel) — of
+'m los markeren als *Nog te verrekenen via een tikkie*. Die markering is een wachtlijstje los van
+de bundels: op het Tikkies-tabblad verschijnt boven de bundels een lijst *Nog te verrekenen*, met
+een knop *Bundel maken van deze* die er in één klik een bundel van maakt. De markering blijft staan
+tot je 'm zelf weghaalt (ook nadat de transactie in een bundel zit — je ziet dan een *in bundel: …*-
+label); het vlaggetje leeft als `teVerrekenen` op de transactie.
 
 **Datamodel.** Een bundel is een zelfstandig object in `state.bundles`:
 `{ id, naam, txIds:[], verdeelModus:"personen"|"bedrag", ikDoeMee:bool,
