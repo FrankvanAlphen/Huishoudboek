@@ -96,17 +96,26 @@ function TrendView({ categories, actualByCat, names, monthsElapsed }) {
   );
 }
 
-function Uitgaven({ groups, categories, budgets, year, years = [], transactions, onAddCategory, onSetYtd, onSetSubBudget }) {
+function Uitgaven({ groups, categories, budgets, year, years = [], transactions, bundles = [], onAddCategory, onSetYtd, onSetSubBudget }) {
   const [expanded, setExpanded] = useState(null);
   const [view, setView] = useState("vergelijking"); // startweergave: begroot naast werkelijk
   const [viewYearId, setViewYearId] = useState(year.id);
   const vY = years.find((y) => y.id === viewYearId) || year;
   const monthsElapsed = useMemo(() => { let m = 1; for (const t of transactions) if (effYear(t) === vY.jaartal) m = Math.max(m, effMonth(t)); return m; }, [transactions, vY]);
   const lines = useMemo(() => applySluitpost(categories, budgets[vY.id] || {}), [categories, budgets, vY]);
+  // Welke transacties zitten in een bundel? Die halen we uit de losse post-blokjes en tellen we
+  // onder hun bundel, zodat een activiteit (bijv. een dagje uit) als één uitgave zichtbaar is en
+  // het totaal niet dubbel meetelt. Dit is puur wéérgave: de begroting blijft op posten rekenen.
+  const bundelVanTx = useMemo(() => {
+    const m = new Map();
+    for (const b of bundles) for (const id of (b.txIds || [])) m.set(id, b);
+    return m;
+  }, [bundles]);
   const blocksByCat = useMemo(() => {
     const map = {};
     for (const t of transactions) {
       if (effYear(t) !== vY.jaartal) continue;
+      if (bundelVanTx.has(t.id)) continue; // telt onder zijn bundel
       for (const a of t.allocations) {
         if (!map[a.categoryId]) map[a.categoryId] = [];
         map[a.categoryId].push({ id: t.id, date: t.date, amountCents: a.amountCents, note: t.note || "", flagged: !!t.flagged, label: t.omschrijving || t.name || "" });
@@ -114,7 +123,23 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
     }
     for (const k in map) map[k].sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
     return map;
-  }, [transactions, vY]);
+  }, [transactions, vY, bundelVanTx]);
+  // Per bundel: de blokjes van de eigen transacties, het totaal, en de maand waarin de bundel
+  // meetelt (die van de láátste transactie — de activiteit is dan afgelopen).
+  const bundelRijen = useMemo(() => {
+    const out = [];
+    for (const b of bundles) {
+      const eigen = transactions.filter((t) => (b.txIds || []).includes(t.id) && effYear(t) === vY.jaartal);
+      if (eigen.length === 0) continue;
+      const blocks = eigen
+        .map((t) => ({ id: t.id, date: t.date, amountCents: (t.allocations || []).reduce((s, a) => s + a.amountCents, 0) || t.amountCents, note: t.note || "", flagged: !!t.flagged, label: t.omschrijving || t.name || "" }))
+        .sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
+      const net = blocks.reduce((s, x) => s + x.amountCents, 0);
+      const laatsteMaand = eigen.reduce((m, t) => Math.max(m, effMonth(t)), 1);
+      out.push({ bundle: b, blocks, net, maand: laatsteMaand });
+    }
+    return out.sort((x, y) => (x.maand - y.maand) || x.bundle.naam.localeCompare(y.bundle.naam, "nl"));
+  }, [bundles, transactions, vY]);
   const actualByCat = useMemo(() => {
     const map = {};
     for (const t of transactions) {
@@ -209,7 +234,7 @@ function Uitgaven({ groups, categories, budgets, year, years = [], transactions,
         })}
       </Card>
       )}
-      {view === "blokjes" && <BlokjesView groups={groups} categories={categories} blocksByCat={blocksByCat} names={names} />}
+      {view === "blokjes" && <BlokjesView groups={groups} categories={categories} blocksByCat={blocksByCat} bundelRijen={bundelRijen} names={names} />}
       {view === "winkels" && <WinkelMatrix categories={categories} transactions={transactions} vY={vY} />}
       {view === "subposten" && <SubpostView categories={categories} transactions={transactions} vY={vY} monthsElapsed={monthsElapsed} onSetSubBudget={onSetSubBudget} />}
       {view === "maand" && <MaandMatrix groups={groups} categories={categories} lines={lines} actualByCat={actualByCat} />}
@@ -308,10 +333,12 @@ function SubpostView({ categories, transactions, vY, monthsElapsed = 12, onSetSu
   );
 }
 
-function BlokjesView({ groups, categories, blocksByCat, names }) {
+function BlokjesView({ groups, categories, blocksByCat, bundelRijen = [], names }) {
   const dayLabel = (iso) => `${Number(iso.slice(8, 10))} ${names[Number(iso.slice(5, 7)) - 1]}`;
   const [fMaand, setFMaand] = useState(0); // 0 = hele jaar
   const blocksOf = (cid) => (blocksByCat[cid] || []).filter((b) => !fMaand || Number(String(b.date).slice(5, 7)) === fMaand);
+  // bundels vallen in de maand van hun laatste transactie
+  const zichtbareBundels = bundelRijen.filter((r) => !fMaand || r.maand === fMaand);
   const anyData = Object.values(blocksByCat).some((b) => b && b.length);
   if (!anyData) return <Card style={{ padding: 18 }}><div style={{ fontSize: 14, color: T.sub }}>Nog geen transacties om als blokjes te tonen. Importeer eerst je ING-bestand onder <b>Import</b>.</div></Card>;
   return (
@@ -354,6 +381,55 @@ function BlokjesView({ groups, categories, blocksByCat, names }) {
           </Card>
         );
       })}
+
+      {zichtbareBundels.length > 0 && (
+        <Card style={{ overflow: "hidden" }}>
+          <div style={{ padding: "9px 16px", background: "#f0f4f3", fontSize: 13, fontWeight: 700, display: "flex", justifyContent: "space-between", gap: 10 }}>
+            <span>Bundels</span>
+            <span style={{ fontFamily: T.mono, fontWeight: 600, color: T.sub }}>{formatEUR(Math.abs(zichtbareBundels.reduce((s, r) => s + r.net, 0)))}</span>
+          </div>
+          <div style={{ padding: "8px 16px", fontSize: 11.5, color: T.sub, borderTop: `1px solid ${T.line}` }}>
+            Gebundelde uitgaven tellen hier als één geheel; ze staan daarom niet meer los onder hun post. Een bundel valt in de maand van zijn laatste transactie.
+          </div>
+          {zichtbareBundels.map((r) => (
+            <BundelBlokRij key={r.bundle.id} rij={r} names={names} />
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// Eén bundel als rij in de blokjes-weergave: links naam + totaal, rechts de losse transacties
+// als blokjes (in-/uitklapbaar zodat de lijst rustig blijft bij veel transacties).
+function BundelBlokRij({ rij, names }) {
+  const [open, setOpen] = useState(true);
+  const { bundle, blocks, net, maand } = rij;
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "flex-start", padding: "12px 16px", borderTop: `1px solid ${T.line}` }}>
+      <div style={{ width: 150, flexShrink: 0 }}>
+        <button onClick={() => setOpen((o) => !o)} style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 13, fontWeight: 600, lineHeight: 1.25, color: T.ink }}>
+          {open ? "▾" : "▸"} {bundle.naam}
+        </button>
+        <div style={{ fontSize: 12, fontFamily: T.mono, color: T.sub, marginTop: 2 }}>{formatEUR(Math.abs(net))} · {blocks.length}×</div>
+        <div style={{ fontSize: 10.5, color: T.sub, marginTop: 2 }}>{names[maand - 1]}{bundle.delen ? " · gedeeld" : ""}</div>
+      </div>
+      {open && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7, flex: 1 }}>
+          {blocks.map((b, i) => {
+            const back = b.amountCents > 0;
+            const border = back ? "#bfe3c4" : b.flagged ? T.warn : T.line;
+            const bg = back ? "#eef7ee" : b.flagged ? "#fdf6e9" : "#fafcfb";
+            return (
+              <div key={b.id + "-" + i} title={b.label} style={{ display: "inline-flex", flexDirection: "column", gap: 2, border: `1px solid ${border}`, background: bg, borderRadius: 9, padding: "6px 9px", minWidth: 62, maxWidth: 150 }}>
+                <span style={{ fontFamily: T.mono, fontWeight: 700, fontSize: 12.5, color: back ? T.pos : T.ink }}>{back ? "+ " : ""}{formatEUR(Math.abs(b.amountCents))}</span>
+                <span style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.label || b.note}</span>
+                <span style={{ fontSize: 10, color: T.sub }}>{String(b.date).slice(8, 10)}-{String(b.date).slice(5, 7)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

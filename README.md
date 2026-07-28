@@ -86,7 +86,13 @@ verantwoordelijke: backups, beschikbaarheid en het melden van datalekken liggen 
 
 ## Bundels & tikkies
 
-Eén systeem voor het delen van uitgaven — geen los voorschot meer, geen automatische herkenning.
+Een bundel groepeert losse transacties tot één geheel. Dat dient twee doelen, en delen is optioneel:
+
+1. **Overzicht van een activiteit.** Een dagje Efteling bestaat uit kaartjes, parkeren, een drankje
+   en pannenkoeken. Bundel je die, dan zie je in het uitgaven-overzicht in één regel wat de dag
+   samen kostte. Nieuwe bundels staan standaard in deze stand (`delen: false`).
+2. **Delen en tikkies bijhouden.** Zet *Delen met anderen* aan en de bundel krijgt personen, een
+   verdeling en betaald-vinkjes. Geen los voorschot meer, geen automatische herkenning.
 
 **Een bundel maken.** Op het tabblad *Tikkies & delen* klik je op *+ Nieuwe bundel*, geeft een naam,
 en vinkt de bestaande transacties aan die erbij horen. De bundel toont het totaal.
@@ -108,7 +114,7 @@ hooguit één bundel; kies je een andere, dan verhuist hij.
 afgevinkt, wordt de knop *Afhandelen* actief en verhuist de bundel naar *Afgehandelde tikkies*.
 Vergist? Met *Heropenen* (achter een bevestiging) zet je hem terug op open. De transacties in een
 bundel kun je altijd zien en aanpassen (in-/uitklappen, eruit halen). In de zijbalk staat naast
-*Tikkies & delen* een telbadge met het aantal nog niet-afgehandelde bundels, zodat je ziet dat er
+*Tikkies & delen* een telbadge met het aantal nog niet-afgehandelde bundels waarvoor delen aan staat, zodat je ziet dat er
 nog tikkies afgerond moeten worden zonder het tabblad te openen.
 
 **Vanuit het transactie-scherm.** Bij het toekennen van een transactie (in de rij én in het
@@ -119,6 +125,14 @@ de bundels: op het Tikkies-tabblad verschijnt boven de bundels een lijst *Nog te
 een knop *Bundel maken van deze* die er in één klik een bundel van maakt. De markering blijft staan
 tot je 'm zelf weghaalt (ook nadat de transactie in een bundel zit — je ziet dan een *in bundel: …*-
 label); het vlaggetje leeft als `teVerrekenen` op de transactie.
+
+**In het uitgaven-overzicht.** In de weergave *Blokjes* staat onder de posten een sectie **Bundels**
+met per bundel één in-/uitklapbare regel: naam, totaal, aantal transacties en de maand. De
+gebundelde transacties worden daar uit hun eigen post gehaald en onder de bundel geteld, zodat het
+geld niet dubbel meetelt — posten + bundels is samen precies je jaartotaal. Een bundel valt in de
+maand van zijn **laatste** transactie (koop je de kaartjes in mei en ga je in juni, dan telt juni).
+Dit is puur weergave: de **begroting** en de vorig-jaar-cijfers blijven op de oorspronkelijke posten
+rekenen, zodat je budgetvergelijking per post intact blijft.
 
 **Datamodel.** Een bundel is een zelfstandig object in `state.bundles`:
 `{ id, naam, txIds:[], verdeelModus:"personen"|"bedrag", ikDoeMee:bool,

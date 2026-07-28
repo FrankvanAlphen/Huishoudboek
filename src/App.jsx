@@ -387,7 +387,7 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
   // Een bundel is een zelfstandig object: naam, txIds, verdeelmodus, personen (met bedrag +
   // betaald), en een afgehandeld-vlag. Geen settlements op transacties meer.
   const maakBundel = (naam, txIds) => {
-    const b = { id: uid(), naam: String(naam || "").trim() || "Bundel", txIds: [...(txIds || [])], verdeelModus: "personen", ikDoeMee: true, personen: [], afgehandeld: false };
+    const b = { id: uid(), naam: String(naam || "").trim() || "Bundel", txIds: [...(txIds || [])], verdeelModus: "personen", ikDoeMee: true, personen: [], delen: false, afgehandeld: false };
     setState((s) => ({ ...s, bundles: [...(s.bundles || []), b] }));
     logAction("bundel aangemaakt: " + b.naam);
   };
@@ -414,7 +414,7 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
       // eerst txId uit elke bestaande bundel verwijderen
       let bundles = (s.bundles || []).map((b) => ((b.txIds || []).includes(txId) ? { ...b, txIds: b.txIds.filter((x) => x !== txId) } : b));
       if (keuze && keuze.nieuw) {
-        bundles = [...bundles, { id: uid(), naam: String(keuze.nieuw).trim() || "Bundel", txIds: [txId], verdeelModus: "personen", ikDoeMee: true, personen: [], afgehandeld: false }];
+        bundles = [...bundles, { id: uid(), naam: String(keuze.nieuw).trim() || "Bundel", txIds: [txId], verdeelModus: "personen", ikDoeMee: true, personen: [], delen: false, afgehandeld: false }];
       } else if (keuze) {
         bundles = bundles.map((b) => (b.id === keuze ? { ...b, txIds: [...(b.txIds || []), txId] } : b));
       }
@@ -495,7 +495,7 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
     ["overzicht", "Overzicht", icons.overzicht],
     ["begroting", "Begroting", icons.begroting],
     ["transacties", "Transacties", icons.transacties],
-    ["tikkies", "Tikkies & delen", icons.transacties],
+    ["tikkies", "Bundels & tikkies", icons.transacties],
     ["uitgaven", "Uitgaven", icons.uitgaven],
     ["vermogen", "Vermogen", icons.vermogen],
     ["posten", "Posten", icons.posten],
@@ -506,7 +506,7 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
   const teSorterenBadge = transactions.reduce((n, t) => n + (effYear(t) === year.jaartal && (!t.allocations || t.allocations.length === 0) ? 1 : 0), 0);
   // Aantal open bundels (nog niet afgehandeld) — badge op het Tikkies-tabblad, zodat je ziet dat er
   // nog tikkies afgerond moeten worden zonder het tabblad te openen.
-  const openBundelsBadge = (state.bundles || []).reduce((n, b) => n + (b.afgehandeld ? 0 : 1), 0);
+  const openBundelsBadge = (state.bundles || []).reduce((n, b) => n + (b.delen && !b.afgehandeld ? 1 : 0), 0);
 
   const asideStyle = isMobile
     ? { width: 240, background: T.panel, borderRight: `1px solid ${T.line}`, padding: "20px 14px", position: "fixed", top: 0, left: 0, height: "100vh", boxSizing: "border-box", zIndex: 41, transform: menuOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease", boxShadow: menuOpen ? "2px 0 16px rgba(0,0,0,0.15)" : "none" }
@@ -600,7 +600,7 @@ function Workspace({ state, setState, dbReady, user, isAdmin, meta, onLogout, co
             {tab === "begroting" && <Begroting groups={groups} categories={categories} budgets={budgets} year={year} onSaveLine={saveLine} onImportBudget={onImportBudget} onAddCategory={addCategory} onAddGroup={addGroup} onAcceptSluitpost={acceptSluitpost} prevYear={prevYear} prevActualByCat={prevActualByCat} onSetYtd={setYtdSeed} onSetSubBudget={setSubBudget} />}
             {tab === "transacties" && <Transacties onOpenTikkies={() => setTab("tikkies")} bundles={state.bundles || []} onSetBundle={setTxBundle} onClearBatch={clearBatch} groups={groups} categories={categories} year={year} transactions={transactions} rules={rules} onSetAllocations={setTxAllocations} onSetNote={setTxNote} onToggleFlag={toggleTxFlag} onAddRule={addRule} onSaveOne={patchTx} onClearYear={clearYearTransactions} onClearRange={clearTransactionsInRange} onClearAll={clearAllTransactions} onResetAll={resetAllKeepRules} onAddManual={addManualTx} onCreateSavings={createSavingsAccount} onLinkSavings={linkSavingsCode} reviewedBatches={reviewedBatches} onMarkBatchReviewed={markBatchReviewed} kickReview={reviewKick} years={years} preset={txPreset} onPresetConsumed={() => setTxPreset(null)} />}
             {tab === "tikkies" && <TikkiesEnDelen transactions={transactions} bundles={state.bundles || []} onMaakBundel={maakBundel} onWijzigBundel={wijzigBundel} onVerwijderBundel={verwijderBundel} onAfhandelen={afhandelenBundel} onHeropen={heropenBundel} onSetTeVerrekenen={setTeVerrekenen} />}
-            {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
+            {tab === "uitgaven" && <Uitgaven groups={groups} categories={categories} budgets={budgets} year={year} years={years} transactions={transactions} bundles={state.bundles || []} onAddCategory={addCategory} onSetYtd={setYtdSeed} />}
             {tab === "vermogen" && <Vermogen pots={pots} categories={categories} transactions={transactions} year={year} budgetLines={budgets[year.id] || {}} onSetPotOpening={setPotOpening} onSetPotTarget={setPotTarget} onSetSpaarcode={(id, code) => updateCategory(id, { spaarcode: code })} />}
             {tab === "posten" && <Posten groups={groups} categories={categories} transactions={transactions} year={year} onToggleNote={toggleNote} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onAddCategory={addCategory} />}
             {tab === "import" && <Import categories={categories} groups={groups} rules={rules} existingHashes={derived.existingHashes} history={transactions} onCommit={commitImport} onStartReview={startReview} />}

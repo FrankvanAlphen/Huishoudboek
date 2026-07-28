@@ -103,6 +103,12 @@ function BundelKaart({ bundle, transactions, onWijzig, onVerwijder, onAfhandelen
         </div>
       )}
 
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 10, cursor: "pointer" }}>
+        <Toggle on={!!bundle.delen} onClick={() => patch({ delen: !bundle.delen })} />
+        <span>Delen met anderen (tikkie sturen en bijhouden)</span>
+      </label>
+
+      {bundle.delen && (<>
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
         <Btn size="sm" variant={modus === "personen" ? "secondary" : "ghost"} onClick={() => patch({ verdeelModus: "personen" })}>Gelijk delen</Btn>
         <Btn size="sm" variant={modus === "bedrag" ? "secondary" : "ghost"} onClick={() => patch({ verdeelModus: "bedrag" })}>Bedrag per persoon</Btn>
@@ -144,10 +150,13 @@ function BundelKaart({ bundle, transactions, onWijzig, onVerwijder, onAfhandelen
         )}
         <div style={{ marginTop: 6 }}>{stand.betaaldAantal} van {stand.aantalPersonen} betaald · nog open {money(stand.openBedrag)}</div>
       </div>
+      </>)}
 
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
         <Btn size="sm" variant="ghost" onClick={onVerwijder}>Bundel verwijderen</Btn>
-        <Btn size="sm" disabled={!stand.iedereenBetaald} onClick={onAfhandelen} title={stand.iedereenBetaald ? "Naar afgehandeld" : "Eerst iedereen afvinken"}>Afhandelen</Btn>
+        {bundle.delen
+          ? <Btn size="sm" disabled={!stand.iedereenBetaald} onClick={onAfhandelen} title={stand.iedereenBetaald ? "Naar afgerond" : "Eerst iedereen afvinken"}>Afhandelen</Btn>
+          : <Btn size="sm" variant="ghost" onClick={onAfhandelen} title="Naar afgerond — blijft meetellen in Uitgaven">Afronden</Btn>}
       </div>
     </Card>
   );
@@ -162,7 +171,7 @@ function AfgehandeldeKaart({ bundle, transactions, onHeropen }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", border: `1px solid ${T.line}`, borderRadius: 8, marginBottom: 6, fontSize: 12.5 }}>
       <span style={{ fontWeight: 700 }}>{bundle.naam}</span>
-      <span style={{ color: T.sub }}>{stand.aantalPersonen} personen · {formatEUR(stand.total)}</span>
+      <span style={{ color: T.sub }}>{bundle.delen ? `${stand.aantalPersonen} personen · ` : ""}{formatEUR(stand.total)}</span>
       <span style={{ flex: 1 }} />
       {bevestig
         ? <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -245,10 +254,10 @@ function TikkiesEnDelen({ transactions, bundles = [], onMaakBundel, onWijzigBund
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontSize: 15, fontWeight: 800 }}>Tikkies &amp; delen</div>
+        <div style={{ fontSize: 15, fontWeight: 800 }}>Bundels &amp; tikkies</div>
         {!maakNieuw && <Btn size="sm" onClick={() => setMaakNieuw(true)}>+ Nieuwe bundel</Btn>}
       </div>
-      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 6 }}>Bundel je uitgaven, verdeel het bedrag en vink af wie betaald heeft. Is iedereen rond, dan handel je de bundel af.</div>
+      <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 6 }}>Bundel losse uitgaven tot één geheel — bijvoorbeeld een dagje uit — zodat je ziet wat het samen kostte. Wil je het ook delen, zet dan ‘Delen met anderen’ aan en houd de tikkies bij.</div>
 
       {onSetTeVerrekenen && (
         <TeVerrekenenLijst
@@ -271,7 +280,7 @@ function TikkiesEnDelen({ transactions, bundles = [], onMaakBundel, onWijzigBund
 
       {open.length === 0 && !maakNieuw && (
         <Card style={{ padding: 18 }}>
-          <div style={{ fontSize: 12.5, color: T.sub }}>Nog geen open bundels. Maak er een aan om uitgaven te delen en tikkies bij te houden.</div>
+          <div style={{ fontSize: 12.5, color: T.sub }}>Nog geen bundels. Maak er een aan om uitgaven van één activiteit bij elkaar te zien — delen kan later.</div>
         </Card>
       )}
 
@@ -286,7 +295,7 @@ function TikkiesEnDelen({ transactions, bundles = [], onMaakBundel, onWijzigBund
 
       {klaar.length > 0 && (
         <div style={{ marginTop: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: T.sub }}>Afgehandelde tikkies</div>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: T.sub }}>Afgerond</div>
           {klaar.map((b) => (
             <AfgehandeldeKaart key={b.id} bundle={b} transactions={transactions} onHeropen={() => onHeropen(b.id)} />
           ))}
