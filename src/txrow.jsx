@@ -308,6 +308,8 @@ function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [
   const [open, setOpen] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const sign = tx.amountCents < 0 ? -1 : 1;
+  // hoort deze transactie bij een bundel? (voor het subtiele icoontje op de dichte regel)
+  const mijnBundel = (bundles || []).find((b) => (b.txIds || []).includes(tx.id)) || null;
   const allocs = tx.allocations || [];
   const isSplit = allocs.length > 1;
   const uncategorized = allocs.length === 0;
@@ -330,7 +332,10 @@ function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [
           {tx.periodDate && <div style={{ fontSize: 9, color: T.accent, fontWeight: 700 }} title="telt mee voor een andere periode">↪ {String(effMonth(tx)).padStart(2, "0")}-{effYear(tx)}</div>}
         </div>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{tx.name}</div>
+          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {mijnBundel && <span title={`In bundel: ${mijnBundel.naam}`} style={{ color: T.accent, fontSize: 11, marginRight: 5 }}>◉</span>}
+            {tx.name}
+          </div>
           {tx.note && tx.note.trim()
             ? <div style={{ fontSize: 11, color: T.warn, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{tx.note}</div>
             : (tx.omschrijving && tx.omschrijving !== tx.name && <div style={{ fontSize: 11, color: T.sub, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{tx.omschrijving}</div>)}
@@ -391,7 +396,7 @@ function TxRowBase({ tx, groups, categories, rules = [], history = [], years = [
               <span style={{ color: T.sub }}>Nog te verrekenen via een tikkie</span>
             </label>
           )}
-          {onSetBundle && sign < 0 && <BundelKiezer tx={tx} bundles={bundles} onSetBundle={onSetBundle} />}
+          {onSetBundle && <BundelKiezer tx={tx} bundles={bundles} onSetBundle={onSetBundle} />}
           {!splitting && (
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
               <Btn variant="secondary" size="sm" onClick={() => setSplitting(true)}>Verdeel over meerdere posten</Btn>

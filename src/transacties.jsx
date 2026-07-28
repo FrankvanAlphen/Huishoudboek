@@ -364,7 +364,7 @@ function ImportReview({ items, groups, categories, rules = [], history = [], tra
             <span>Nog te verrekenen via een tikkie</span>
           </label>
         )}
-        {onSetBundle && sign < 0 && <div style={{ marginBottom: 14 }}><BundelKiezer tx={cur} bundles={bundles} onSetBundle={onSetBundle} /></div>}
+        {onSetBundle && <div style={{ marginBottom: 14 }}><BundelKiezer tx={cur} bundles={bundles} onSetBundle={onSetBundle} /></div>}
 
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Waar hoort dit bij?</div>
         {isSplit

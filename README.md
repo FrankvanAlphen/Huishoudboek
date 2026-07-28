@@ -119,12 +119,14 @@ nog tikkies afgerond moeten worden zonder het tabblad te openen.
 
 **Vanuit het transactie-scherm.** Bij het toekennen van een transactie (in de rij én in het
 import-doorloopscherm) kun je twee dingen doen: de uitgave direct aan een bundel koppelen — een
-bestaande kiezen of ter plekke een nieuwe maken (één transactie hoort bij hooguit één bundel) — of
+bestaande kiezen of ter plekke een nieuwe maken (één transactie hoort bij hooguit één bundel; dit kan bij
+elke transactie, ook bij inkomsten — een teruggave in een bundel verlaagt het bundeltotaal) — of
 'm los markeren als *Nog te verrekenen via een tikkie*. Die markering is een wachtlijstje los van
 de bundels: op het Tikkies-tabblad verschijnt boven de bundels een lijst *Nog te verrekenen*, met
 een knop *Bundel maken van deze* die er in één klik een bundel van maakt. De markering blijft staan
 tot je 'm zelf weghaalt (ook nadat de transactie in een bundel zit — je ziet dan een *in bundel: …*-
-label); het vlaggetje leeft als `teVerrekenen` op de transactie.
+label); het vlaggetje leeft als `teVerrekenen` op de transactie. Zit een transactie in een bundel, dan
+staat er in de transactielijst een klein bolletje (◉) voor de naam, met de bundelnaam als tooltip.
 
 **In het uitgaven-overzicht.** In de weergave *Blokjes* staat onder de posten een sectie **Bundels**
 met per bundel één in-/uitklapbare regel: naam, totaal, aantal transacties en de maand. De
